@@ -91,6 +91,10 @@ public:
 	 */
 	void ReplaceCommands(std::vector<std::string> commands);
 
+	/** Ruina text-play: read-only access to the command texts and their enabled flags. */
+	const std::vector<std::string>& AiCommands() const { return commands; }
+	const std::vector<bool>& AiCommandsEnabled() const { return commands_enabled; }
+
 protected:
 	std::vector<std::string> commands;
 	std::vector<bool> commands_enabled;

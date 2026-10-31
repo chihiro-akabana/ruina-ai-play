@@ -36,6 +36,29 @@ class PendingMessage;
  */
 class Scene_Battle_Rpg2k : public Scene_Battle {
 public:
+	/**
+	 * Ruina text-play (Phase 3-B): apply a selection by index to the
+	 * battle selection state currently waiting for input, through the
+	 * same dispatch a decision-key press would take. Returns false
+	 * when the scene is not waiting for a selection, or the index is
+	 * invalid or disabled.
+	 */
+	bool AiDecideSelection(int index);
+
+	/** Ruina text-play: the cancel/back action of the current selection state. */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	int AiBattleState() const { return state; }
+	int AiBattleSubState() const { return scene_action_substate; }
+	Window_Command* AiOptionsWindow() { return options_window.get(); }
+	Window_Command* AiCommandWindow() { return command_window.get(); }
+	Window_Command* AiTargetWindow() { return target_window.get(); }
+	Window_Item* AiItemWindow() { return item_window.get(); }
+	Window_BattleSkill* AiSkillWindow() { return skill_window.get(); }
+	Window_BattleMessage* AiBattleMessageWindow() { return battle_message_window.get(); }
+	Game_Actor* AiActiveActor() { return active_actor; }
+
 	/** The return value from a scene action state machine callback */
 	enum class SceneActionReturn {
 		/** Return from Update() and wait until the next frame */

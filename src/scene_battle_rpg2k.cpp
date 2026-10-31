@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include "ai_state.h"
 #include "input.h"
 #include "player.h"
 #include "sprite.h"
@@ -188,7 +189,176 @@ bool Scene_Battle_Rpg2k::UpdateBattleState() {
 	return true;
 }
 
+bool Scene_Battle_Rpg2k::AiDecideSelection(int index) {
+	auto se_decision = []() {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	};
+	switch (state) {
+		case State_SelectOption: {
+			// Substate eWaitForInput == 3 in ProcessSceneActionFightAutoEscape.
+			if (scene_action_substate != 3 || message_window->IsVisible()) {
+				return false;
+			}
+			if (index < 0 || index >= static_cast<int>(options_window->AiCommands().size())
+					|| index >= static_cast<int>(battle_options.size())) {
+				return false;
+			}
+			options_window->SetIndex(index);
+			switch (battle_options[index]) {
+				case Battle:
+					se_decision();
+					RefreshTargetWindow();
+					target_window->SetVisible(false);
+					SetState(State_SelectActor);
+					return true;
+				case AutoBattle:
+					SetState(State_AutoBattle);
+					se_decision();
+					return true;
+				case Escape:
+					if (!IsEscapeAllowed()) {
+						Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+						return false;
+					}
+					se_decision();
+					SetState(State_Escape);
+					return true;
+				default:
+					return false;
+			}
+		}
+		case State_SelectCommand: {
+			// Substate eWaitForInput == 1 in ProcessSceneActionCommand.
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			// Only the fixed RPG2k command layout is supported here.
+			if (Player::IsRPG2k3() && Feature::HasRpg2kBattleSystem()
+					&& !lcf::Data::system.easyrpg_use_rpg2k_battle_commands) {
+				return false;
+			}
+			if (index < 0 || index >= static_cast<int>(command_window->AiCommands().size())) {
+				return false;
+			}
+			if (index < static_cast<int>(command_window->AiCommandsEnabled().size())
+					&& !command_window->AiCommandsEnabled()[index]) {
+				return false;
+			}
+			command_window->SetIndex(index);
+			switch (index) {
+				case 0: // Attack
+					AttackSelected();
+					return true;
+				case 1: // Skill
+					se_decision();
+					SetState(State_SelectSkill);
+					return true;
+				case 2: // Defense
+					DefendSelected();
+					return true;
+				case 3: // Item
+					se_decision();
+					SetState(State_SelectItem);
+					return true;
+				default:
+					return false;
+			}
+		}
+		case State_SelectSkill: {
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			const auto& data = skill_window->AiData();
+			if (index < 0 || index >= static_cast<int>(data.size())) {
+				return false;
+			}
+			if (!skill_window->CheckEnable(data[index])) {
+				return false;
+			}
+			skill_window->SetIndex(index);
+			SkillSelected();
+			return true;
+		}
+		case State_SelectItem: {
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			const auto& data = item_window->AiData();
+			if (index < 0 || index >= static_cast<int>(data.size()) || data[index] == 0) {
+				return false;
+			}
+			if (!item_window->CheckEnable(data[index])) {
+				return false;
+			}
+			item_window->SetIndex(index);
+			ItemSelected();
+			return true;
+		}
+		case State_SelectEnemyTarget: {
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			if (index < 0 || index >= static_cast<int>(target_window->AiCommands().size())) {
+				return false;
+			}
+			target_window->SetIndex(index);
+			EnemySelected();
+			return true;
+		}
+		case State_SelectAllyTarget: {
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			if (index < 0 || index >= static_cast<int>(Main_Data::game_party->GetActors().size())) {
+				return false;
+			}
+			status_window->SetIndex(index);
+			AllySelected();
+			return true;
+		}
+		default:
+			return false;
+	}
+}
+
+bool Scene_Battle_Rpg2k::AiBack() {
+	auto se_cancel = []() {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	};
+	switch (state) {
+		case State_SelectEnemyTarget:
+		case State_SelectAllyTarget:
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			se_cancel();
+			SetState(previous_state);
+			return true;
+		case State_SelectItem:
+		case State_SelectSkill:
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			se_cancel();
+			SetState(State_SelectCommand);
+			return true;
+		case State_SelectCommand:
+			if (scene_action_substate != 1) {
+				return false;
+			}
+			se_cancel();
+			--actor_index;
+			SelectPreviousActor();
+			return true;
+		default:
+			return false;
+	}
+}
+
 void Scene_Battle_Rpg2k::vUpdate() {
+	// Ruina text-play (Phase 3-B): battle state output and commands.
+	AiState::UpdateBattle(this);
+
 	const auto process_scene = UpdateBattleState();
 
 	while (process_scene) {

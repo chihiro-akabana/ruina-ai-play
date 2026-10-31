@@ -41,6 +41,9 @@ public:
 	 */
 	const lcf::rpg::Item* GetItem() const;
 
+	/** Ruina text-play: read-only access to the item ids in display order. */
+	const std::vector<int>& AiData() const { return data; }
+
 	/**
 	 * Checks if the item should be in the list.
 	 *

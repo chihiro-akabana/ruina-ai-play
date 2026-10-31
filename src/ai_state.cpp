@@ -16,8 +16,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <lcf/reader_util.h>
+
 #include "game_actor.h"
 #include "game_battle.h"
+#include "game_battler.h"
+#include "game_enemyparty.h"
 #include "game_event.h"
 #include "game_map.h"
 #include "game_message.h"
@@ -25,7 +29,9 @@
 #include "game_player.h"
 #include "main_data.h"
 #include "pending_message.h"
+#include "scene_battle_rpg2k.h"
 #include "scene_name.h"
+#include "window_command.h"
 #include "window_message.h"
 
 namespace AiState {
@@ -56,8 +62,9 @@ struct Command {
 };
 
 long g_last_seq = 0;
-// Command domains: 0 = message window, 1 = name screen, 2 = exploration.
-std::string g_cmd_raw_seen[3];
+// Command domains: 0 = message window, 1 = name screen, 2 = exploration,
+// 3 = battle selections.
+std::string g_cmd_raw_seen[4];
 bool g_has_pending = false;
 Command g_pending;
 
@@ -79,6 +86,20 @@ int g_goto_ty = -1;
 int g_idle_frames = 0;
 int g_last_hx = -1;
 int g_last_hy = -1;
+
+// Battle (Phase 3-B) bookkeeping.
+std::vector<std::string> g_battle_prev_lines;
+std::vector<std::string> g_battle_log;
+bool g_battle_result_sent = false;
+// The finished battle's result, attached to the next emitted state
+// (whatever it is) as "last_battle" instead of being emitted as a
+// state of its own: a standalone result state would displace a
+// still-pending victory/defeat message state and orphan it.
+bool g_battle_pending = false;
+std::string g_battle_pending_result;
+std::vector<std::string> g_battle_pending_log;
+bool g_battle_active = false;
+long g_battle_seq = 0;
 
 /**
  * Removes presentation-only control codes (\c[..], \s[..], \>, \!, ...)
@@ -227,11 +248,22 @@ bool Emit(nlohmann::json state) {
 	if (!g_enabled) {
 		return false;
 	}
+	if (g_battle_pending && !state.contains("last_battle")) {
+		nlohmann::json bundle;
+		bundle["result"] = g_battle_pending_result;
+		bundle["battle_seq"] = g_battle_seq;
+		bundle["log"] = g_battle_pending_log;
+		state["last_battle"] = std::move(bundle);
+	}
 	std::string content = state.dump();
 	if (content == g_last_content) {
 		return false; // unchanged state: suppress (token-cost rule from the plan)
 	}
 	g_last_content = content;
+	if (state.contains("last_battle")) {
+		g_battle_pending = false;
+		g_battle_pending_log.clear();
+	}
 
 	DropPending("state changed");
 
@@ -784,6 +816,222 @@ void UpdateExplore() {
 		if (Emit(std::move(state))) {
 			g_explore_points = std::move(pts);
 		}
+	}
+}
+
+namespace {
+
+bool IsBattleDecisionType(const std::string& t) {
+	return t == "battle_option" || t == "battle_command" || t == "battle_skill"
+			|| t == "battle_item" || t == "battle_target" || t == "battle_target_ally";
+}
+
+// Accumulate the battle narration lines (damage, results, dice-like
+// outcomes) shown since the last snapshot of the battle message
+// window. The window holds one page of lines and is cleared between
+// phases; a cleared window restarts the accumulation.
+void CaptureBattleLog(Scene_Battle_Rpg2k* scene) {
+	auto* win = scene->AiBattleMessageWindow();
+	if (win == nullptr) {
+		return;
+	}
+	std::vector<std::string> clean;
+	for (const std::string& line : win->GetLines()) {
+		std::string c = StripControlCodes(line);
+		if (!c.empty()) {
+			clean.push_back(c);
+		}
+	}
+	if (clean == g_battle_prev_lines) {
+		return;
+	}
+	const bool prefix = clean.size() > g_battle_prev_lines.size()
+			&& std::equal(g_battle_prev_lines.begin(), g_battle_prev_lines.end(), clean.begin());
+	if (prefix) {
+		for (size_t i = g_battle_prev_lines.size(); i < clean.size(); ++i) {
+			g_battle_log.push_back(clean[i]);
+		}
+	} else {
+		for (const auto& l : clean) {
+			g_battle_log.push_back(l);
+		}
+	}
+	while (g_battle_log.size() > 60) {
+		g_battle_log.erase(g_battle_log.begin());
+	}
+	g_battle_prev_lines = std::move(clean);
+}
+
+nlohmann::json WindowChoices(Window_Command* win) {
+	nlohmann::json arr = nlohmann::json::array();
+	if (win == nullptr) {
+		return arr;
+	}
+	for (size_t i = 0; i < win->AiCommands().size(); ++i) {
+		nlohmann::json c;
+		c["index"] = static_cast<int>(i);
+		c["text"] = win->AiCommands()[i];
+		c["enabled"] = i >= win->AiCommandsEnabled().size() || win->AiCommandsEnabled()[i];
+		arr.push_back(std::move(c));
+	}
+	return arr;
+}
+
+nlohmann::json BattleEnemies() {
+	nlohmann::json arr = nlohmann::json::array();
+	std::vector<Game_Battler*> battlers;
+	Main_Data::game_enemyparty->GetActiveBattlers(battlers);
+	for (auto* b : battlers) {
+		nlohmann::json e;
+		e["name"] = b->GetName();
+		arr.push_back(std::move(e));
+	}
+	return arr;
+}
+
+} // namespace
+
+void UpdateBattle(Scene_Battle_Rpg2k* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	const int st = scene->AiBattleState();
+	const int sub = scene->AiBattleSubState();
+	const int kStart = static_cast<int>(Scene_Battle::State_Start);
+	const int kVictory = static_cast<int>(Scene_Battle::State_Victory);
+	const int kDefeat = static_cast<int>(Scene_Battle::State_Defeat);
+
+	if (st == kStart && !g_battle_active) {
+		g_battle_active = true;
+		++g_battle_seq;
+		g_battle_result_sent = false;
+		g_battle_log.clear();
+		g_battle_prev_lines.clear();
+	}
+
+	CaptureBattleLog(scene);
+
+	// At victory / defeat, stash the result for the next emitted
+	// state (see g_battle_pending). Emitting a standalone result
+	// state here would orphan the victory/defeat message state that
+	// was emitted just before, while it still waits for "advance".
+	// (Escape resolves through the following states instead: a failed
+	// escape returns to the option state, a successful one ends the
+	// scene and the map states resume.)
+	if ((st == kVictory || st == kDefeat) && !g_battle_result_sent) {
+		g_battle_result_sent = true;
+		g_battle_pending = true;
+		g_battle_pending_result = st == kVictory ? "victory" : "defeat";
+		g_battle_pending_log = g_battle_log;
+		g_battle_log.clear();
+	}
+
+	// Decision states: built every frame while the scene waits for
+	// input; Emit's content comparison suppresses the repeats, so a
+	// state goes out exactly when something changed (party status,
+	// choices, or fresh narration in the log). The log is cleared
+	// only when the state was actually emitted.
+	std::string kind;
+	nlohmann::json choices;
+	Game_Actor* actor = scene->AiActiveActor();
+	if (st == static_cast<int>(Scene_Battle::State_SelectOption) && sub == 3) {
+		kind = "battle_option";
+		choices = WindowChoices(scene->AiOptionsWindow());
+	} else if (st == static_cast<int>(Scene_Battle::State_SelectCommand) && sub == 1) {
+		kind = "battle_command";
+		choices = WindowChoices(scene->AiCommandWindow());
+	} else if (st == static_cast<int>(Scene_Battle::State_SelectSkill) && sub == 1) {
+		kind = "battle_skill";
+		choices = nlohmann::json::array();
+		auto* win = scene->AiSkillWindow();
+		if (win != nullptr && actor != nullptr) {
+			for (size_t i = 0; i < win->AiData().size(); ++i) {
+				const int skill_id = win->AiData()[i];
+				const auto* skill = lcf::ReaderUtil::GetElement(lcf::Data::skills, skill_id);
+				nlohmann::json c;
+				c["index"] = static_cast<int>(i);
+				c["text"] = skill != nullptr ? skill->name : "";
+				c["cost"] = actor->CalculateSkillCost(skill_id);
+				c["enabled"] = win->CheckEnable(skill_id);
+				choices.push_back(std::move(c));
+			}
+		}
+	} else if (st == static_cast<int>(Scene_Battle::State_SelectItem) && sub == 1) {
+		kind = "battle_item";
+		choices = nlohmann::json::array();
+		auto* win = scene->AiItemWindow();
+		if (win != nullptr) {
+			for (size_t i = 0; i < win->AiData().size(); ++i) {
+				const int item_id = win->AiData()[i];
+				const auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, item_id);
+				nlohmann::json c;
+				c["index"] = static_cast<int>(i);
+				c["text"] = item != nullptr ? item->name : "";
+				c["count"] = item_id > 0 ? Main_Data::game_party->GetItemCount(item_id) : 0;
+				c["enabled"] = item_id > 0 && win->CheckEnable(item_id);
+				choices.push_back(std::move(c));
+			}
+		}
+	} else if (st == static_cast<int>(Scene_Battle::State_SelectEnemyTarget) && sub == 1) {
+		kind = "battle_target";
+		choices = WindowChoices(scene->AiTargetWindow());
+	} else if (st == static_cast<int>(Scene_Battle::State_SelectAllyTarget) && sub == 1) {
+		kind = "battle_target_ally";
+		choices = nlohmann::json::array();
+		int idx = 0;
+		for (auto* member : Main_Data::game_party->GetActors()) {
+			nlohmann::json c;
+			c["index"] = idx++;
+			c["text"] = member->GetName();
+			c["hp"] = member->GetHp();
+			c["max_hp"] = member->GetMaxHp();
+			c["enabled"] = true;
+			choices.push_back(std::move(c));
+		}
+	}
+
+	if (!kind.empty()) {
+		nlohmann::json state = BuildContext();
+		state["type"] = kind;
+		state["choices"] = choices;
+		state["enemies"] = BattleEnemies();
+		if (actor != nullptr && (kind == "battle_command" || kind == "battle_skill" || kind == "battle_item")) {
+			nlohmann::json a;
+			a["name"] = actor->GetName();
+			a["hp"] = actor->GetHp();
+			a["max_hp"] = actor->GetMaxHp();
+			a["sp"] = actor->GetSp();
+			a["max_sp"] = actor->GetMaxSp();
+			state["actor"] = std::move(a);
+		}
+		if (!g_battle_log.empty()) {
+			state["log"] = g_battle_log;
+		}
+		if (Emit(std::move(state))) {
+			g_battle_log.clear();
+		}
+	}
+
+	// Command intake (domain 3). "choose" is shared with the message
+	// domain: only consume it when the latest state is a battle
+	// decision state, otherwise leave it for the message window.
+	Command cmd;
+	if (ReadFreshCommand(cmd, 3)) {
+		if (cmd.state_id != g_last_id) {
+			Consume(cmd, "rejected", "stale state_id");
+		} else if (cmd.type == "choose" && IsBattleDecisionType(g_last_type)) {
+			bool ok = cmd.index >= 0 && scene->AiDecideSelection(cmd.index);
+			Consume(cmd, ok ? "applied" : "rejected", ok ? "" : "selection failed");
+		} else if (cmd.type == "back") {
+			if (IsBattleDecisionType(g_last_type)) {
+				bool ok = scene->AiBack();
+				Consume(cmd, ok ? "applied" : "rejected", ok ? "" : "cannot go back here");
+			} else {
+				Consume(cmd, "rejected", "state is not a battle selection");
+			}
+		}
+		// Other command types belong to other domains.
 	}
 }
 

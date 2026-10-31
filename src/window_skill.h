@@ -100,6 +100,9 @@ class Window_BattleSkill : public Window_Skill {
 	public:
 		using Window_Skill::Window_Skill;
 
+		/** Ruina text-play: read-only access to the skill ids in display order. */
+		const std::vector<int>& AiData() const { return data; }
+
 		/**
 		 * Saves the value of GetIndex() for actor.
 		 *

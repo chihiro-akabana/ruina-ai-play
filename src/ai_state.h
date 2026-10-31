@@ -36,6 +36,7 @@
 
 class PendingMessage;
 class Window_Message;
+class Scene_Battle_Rpg2k;
 class Scene_Name;
 
 namespace AiState {
@@ -70,6 +71,19 @@ bool PollNameCommand(Scene_Name* scene);
  * referenced by index and tile position only.
  */
 void UpdateExplore();
+
+/**
+ * Phase 3-B: per-frame battle hook, called from the RPG2k battle
+ * scene. Emits battle decision states (option / command / skill /
+ * item / enemy or ally target) when the scene waits for input, with
+ * the battle narration since the previous decision attached as a
+ * compact log. On victory/defeat the result is not emitted as its
+ * own state (that would orphan the still-pending result message);
+ * it is attached to the next emitted state as "last_battle".
+ * Applies "choose" and "back" commands through the scene's own
+ * selection dispatch.
+ */
+void UpdateBattle(Scene_Battle_Rpg2k* scene);
 
 } // namespace AiState
 
