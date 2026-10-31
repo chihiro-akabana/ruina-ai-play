@@ -35,6 +35,7 @@
 #include "util_macro.h"
 #include "game_battle.h"
 #include "bitmap.h"
+#include "ai_state.h"
 #include "font.h"
 #include "cache.h"
 #include "text.h"
@@ -187,6 +188,9 @@ void Window_Message::StartMessageProcessing(PendingMessage pm) {
 
 	text_index = text.data();
 
+	// Ruina text-play (Phase 1): dump the assembled message state.
+	AiState::OnMessageStart(pending_message, text);
+
 	DebugLog("{}: MSG TEXT \n{}", text);
 
 	auto open_frames = (!IsVisible() && !Game_Battle::IsBattleRunning()) ? message_animation_frames : 0;
@@ -214,10 +218,14 @@ void Window_Message::OnFinishPage() {
 }
 
 void Window_Message::StartChoiceProcessing() {
+	// Ruina text-play (Phase 1): dump the choice state.
+	AiState::OnChoiceStart(pending_message);
 	SetIndex(0);
 }
 
 void Window_Message::StartNumberInputProcessing() {
+	// Ruina text-play (Phase 1): dump the number-input state.
+	AiState::OnNumberInputStart(pending_message);
 	number_input_window->SetMaxDigits(pending_message.GetNumberInputDigits());
 	if (IsFaceEnabled() && !Main_Data::game_system->IsMessageFaceRightPosition()) {
 		number_input_window->SetX(Player::message_box_offset_x + LeftMargin + FaceSize + RightFaceMargin);

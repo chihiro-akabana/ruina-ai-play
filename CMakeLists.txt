@@ -440,6 +440,8 @@ add_library(${PROJECT_NAME} OBJECT
 	src/window_menustatus.h
 	src/window_message.cpp
 	src/window_message.h
+	src/ai_state.cpp
+	src/ai_state.h
 	src/window_name.cpp
 	src/window_name.h
 	src/window_numberinput.cpp
