@@ -17,6 +17,7 @@
 
 // Headers
 #include "scene_gameover.h"
+#include "ai_state.h"
 #include "scene_map.h"
 #include "scene_menu.h"
 #include "scene_save.h"
@@ -270,6 +271,9 @@ void Scene_Map::UpdateStage1(MapUpdateAsyncContext actx) {
 }
 
 void Scene_Map::UpdateStage2() {
+	// Ruina text-play (Phase 3-A): exploration state output and commands.
+	AiState::UpdateExplore();
+
 	if (Main_Data::game_player->IsPendingTeleport()) {
 		const auto tt = Main_Data::game_player->GetTeleportTarget().GetType();
 		TeleportParams tp;

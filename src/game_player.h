@@ -156,6 +156,13 @@ public:
 	bool IsDatabaseCompatibleWithSave(int database_save_count) const;
 
 	void UpdateSaveCounts(int db_save_count, int map_save_count);
+
+	/**
+	 * Ruina text-play: public entry to the decision-key event check
+	 * (CheckActionEvent), so AI commands can trigger action events
+	 * through exactly the same path as a key press.
+	 */
+	bool AiCheckActionEvent();
 private:
 	using TriggerSet = lcf::FlagSet<lcf::rpg::EventPage::Trigger>;
 

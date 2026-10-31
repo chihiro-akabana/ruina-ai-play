@@ -2,19 +2,27 @@
 
 #include "ai_state.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <queue>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "game_actor.h"
 #include "game_battle.h"
+#include "game_event.h"
 #include "game_map.h"
+#include "game_message.h"
 #include "game_party.h"
+#include "game_player.h"
 #include "main_data.h"
 #include "pending_message.h"
 #include "scene_name.h"
@@ -41,13 +49,36 @@ struct Command {
 	int index = -1;
 	bool has_name = false;
 	std::string name;
+	// explore-domain fields
+	std::string dir;
+	int steps = 0;
+	int point = -1;
 };
 
 long g_last_seq = 0;
-std::string g_cmd_raw_seen_msg;
-std::string g_cmd_raw_seen_name;
+// Command domains: 0 = message window, 1 = name screen, 2 = exploration.
+std::string g_cmd_raw_seen[3];
 bool g_has_pending = false;
 Command g_pending;
+
+// Exploration (Phase 3-A) bookkeeping.
+struct PointInfo {
+	int x = 0;
+	int y = 0;
+	int trigger = 0; // lcf::rpg::EventPage::Trigger value
+	int layer = 0;   // lcf::rpg::EventPage layer: 0 below, 1 same, 2 above
+};
+std::vector<PointInfo> g_explore_points; // points of the last emitted explore state
+std::deque<int> g_move_queue;            // pending step directions (lcf Direction values)
+bool g_has_move_cmd = false;
+Command g_move_cmd;
+bool g_goto_confirm = false;             // after the queue: face the point and confirm
+bool g_goto_face = true;                 // false for below-layer points: confirm standing on them
+int g_goto_tx = -1;
+int g_goto_ty = -1;
+int g_idle_frames = 0;
+int g_last_hx = -1;
+int g_last_hy = -1;
 
 /**
  * Removes presentation-only control codes (\c[..], \s[..], \>, \!, ...)
@@ -191,14 +222,14 @@ void DropPending(const char* reason) {
 	g_has_pending = false;
 }
 
-void Emit(nlohmann::json state) {
+bool Emit(nlohmann::json state) {
 	EnsureInit();
 	if (!g_enabled) {
-		return;
+		return false;
 	}
 	std::string content = state.dump();
 	if (content == g_last_content) {
-		return; // unchanged state: suppress (token-cost rule from the plan)
+		return false; // unchanged state: suppress (token-cost rule from the plan)
 	}
 	g_last_content = content;
 
@@ -217,6 +248,7 @@ void Emit(nlohmann::json state) {
 
 	AppendLine(g_dir + "/states.jsonl", line);
 	WriteFileAtomic(g_dir + "/state.json", line + "\n");
+	return true;
 }
 
 /**
@@ -226,7 +258,7 @@ void Emit(nlohmann::json state) {
  * each poll only consumes commands of its own domain, except that any
  * poll may reject a command addressed to a stale state.
  */
-bool ReadFreshCommand(Command& out, bool name_domain) {
+bool ReadFreshCommand(Command& out, int domain) {
 	std::ifstream in(g_dir + "/command.json");
 	if (!in) {
 		return false;
@@ -235,8 +267,8 @@ bool ReadFreshCommand(Command& out, bool name_domain) {
 	ss << in.rdbuf();
 	std::string raw = ss.str();
 	// Each domain tracks the file content it has already seen, so a
-	// command left for the other domain is still picked up there.
-	std::string& seen = name_domain ? g_cmd_raw_seen_name : g_cmd_raw_seen_msg;
+	// command left for another domain is still picked up there.
+	std::string& seen = g_cmd_raw_seen[domain];
 	if (raw.empty() || raw == seen) {
 		return false;
 	}
@@ -255,6 +287,9 @@ bool ReadFreshCommand(Command& out, bool name_domain) {
 		cmd.has_name = true;
 		cmd.name = parsed["name"].get<std::string>();
 	}
+	cmd.dir = parsed.value("dir", "");
+	cmd.steps = parsed.value("steps", 0);
+	cmd.point = parsed.value("point", -1);
 	if (cmd.seq <= 0 || cmd.seq <= g_last_seq || cmd.type.empty()) {
 		return false; // duplicate write or malformed: not a fresh command
 	}
@@ -395,7 +430,7 @@ void PollMessageCommand(Window_Message* window) {
 	}
 
 	Command cmd;
-	if (ReadFreshCommand(cmd, false)) {
+	if (ReadFreshCommand(cmd, 0)) {
 		if (cmd.state_id != g_last_id) {
 			Consume(cmd, "rejected", "stale state_id");
 		} else if (cmd.type == "advance") {
@@ -445,7 +480,7 @@ bool PollNameCommand(Scene_Name* scene) {
 	}
 
 	Command cmd;
-	if (!ReadFreshCommand(cmd, true)) {
+	if (!ReadFreshCommand(cmd, 1)) {
 		return false;
 	}
 	if (cmd.state_id != g_last_id) {
@@ -474,6 +509,282 @@ bool PollNameCommand(Scene_Name* scene) {
 		Consume(cmd, "rejected", "name confirm failed");
 	}
 	return applied;
+}
+
+namespace {
+
+const char* DirName(int dir) {
+	switch (dir) {
+		case 0: return "up";
+		case 1: return "right";
+		case 2: return "down";
+		case 3: return "left";
+		default: return "unknown";
+	}
+}
+
+int DirFromName(const std::string& name) {
+	if (name == "up") return 0;
+	if (name == "right") return 1;
+	if (name == "down") return 2;
+	if (name == "left") return 3;
+	return -1;
+}
+
+// The currently displayed interaction points: events whose active page
+// shows a sprite and uses an action/touch trigger. Identified by tile
+// position only; event names, ids, and page conditions stay internal.
+std::vector<PointInfo> ComputePoints() {
+	std::vector<PointInfo> pts;
+	for (const Game_Event& ev : Game_Map::GetEvents()) {
+		const auto* page = ev.GetActivePage();
+		if (page == nullptr) {
+			continue;
+		}
+		if (ev.GetSpriteName().empty()) {
+			continue;
+		}
+		const int trig = static_cast<int>(ev.GetTrigger());
+		if (trig != static_cast<int>(lcf::rpg::EventPage::Trigger_action)
+				&& trig != static_cast<int>(lcf::rpg::EventPage::Trigger_touched)
+				&& trig != static_cast<int>(lcf::rpg::EventPage::Trigger_collision)) {
+			continue;
+		}
+		pts.push_back(PointInfo{ev.GetX(), ev.GetY(), trig, static_cast<int>(page->layer)});
+	}
+	std::sort(pts.begin(), pts.end(), [](const PointInfo& a, const PointInfo& b) {
+		return a.y != b.y ? a.y < b.y : a.x < b.x;
+	});
+	return pts;
+}
+
+// True when the engine would accept player input right now.
+bool ExploreCanAct() {
+	auto* player = Main_Data::game_player.get();
+	if (player == nullptr || player->IsPendingTeleport()) {
+		return false;
+	}
+	if (Game_Message::IsMessageActive() || Game_Message::IsMessagePending()) {
+		return false;
+	}
+	if (Game_Map::GetInterpreter().IsRunning() || Game_Map::IsAnyEventStarting()) {
+		return false;
+	}
+	return true;
+}
+
+// Breadth-first path over engine passability (Game_Character::MakeWay,
+// the same test movement itself uses). Fills out_dirs with the step
+// directions from (sx, sy) to any of the target tiles.
+bool FindPath(int sx, int sy, const std::vector<std::pair<int, int>>& targets, std::deque<int>& out_dirs) {
+	auto* player = Main_Data::game_player.get();
+	if (player == nullptr) {
+		return false;
+	}
+	std::map<std::pair<int, int>, bool> target_set;
+	for (const auto& t : targets) {
+		target_set[t] = true;
+	}
+	const int w = Game_Map::GetTilesX();
+	const int h = Game_Map::GetTilesY();
+	std::map<std::pair<int, int>, std::pair<std::pair<int, int>, int>> parent;
+	std::queue<std::pair<int, int>> q;
+	parent[{sx, sy}] = {{-1, -1}, -1};
+	q.push({sx, sy});
+	std::pair<int, int> goal{-1, -1};
+	while (!q.empty()) {
+		auto cur = q.front();
+		q.pop();
+		if (target_set.count(cur) > 0) {
+			goal = cur;
+			break;
+		}
+		for (int dir = 0; dir < 4; ++dir) {
+			int nx = cur.first + Game_Character::GetDxFromDirection(dir);
+			int ny = cur.second + Game_Character::GetDyFromDirection(dir);
+			if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+				continue;
+			}
+			if (parent.count({nx, ny}) > 0) {
+				continue;
+			}
+			if (!player->MakeWay(cur.first, cur.second, nx, ny)) {
+				continue;
+			}
+			parent[{nx, ny}] = {cur, dir};
+			q.push({nx, ny});
+		}
+	}
+	if (goal.first < 0) {
+		return false;
+	}
+	std::deque<int> reversed;
+	auto cur = goal;
+	while (cur.first != sx || cur.second != sy) {
+		auto it = parent.find(cur);
+		if (it == parent.end()) {
+			return false;
+		}
+		reversed.push_front(it->second.second);
+		cur = it->second.first;
+	}
+	out_dirs = reversed;
+	return true;
+}
+
+void ClearMoveCmd(const char* status, const char* reason) {
+	if (status != nullptr) {
+		WriteAck(g_move_cmd, status, reason);
+	}
+	g_move_queue.clear();
+	g_has_move_cmd = false;
+	g_goto_confirm = false;
+	g_goto_face = true;
+}
+
+} // namespace
+
+void UpdateExplore() {
+	EnsureInit();
+	if (!g_enabled) {
+		return;
+	}
+	auto* player = Main_Data::game_player.get();
+	if (player == nullptr || player->IsPendingTeleport()) {
+		return;
+	}
+
+	// 1) Execute / finish / drop an in-flight movement command.
+	if (g_has_move_cmd) {
+		const bool interrupted = Game_Map::GetInterpreter().IsRunning()
+				|| Game_Message::IsMessageActive() || Game_Message::IsMessagePending();
+		if (interrupted && !g_move_queue.empty()) {
+			ClearMoveCmd("dropped", "interrupted by an event");
+		} else if (!g_move_queue.empty() && ExploreCanAct() && !player->IsMoving()) {
+			int dir = g_move_queue.front();
+			g_move_queue.pop_front();
+			if (!player->Move(dir)) {
+				ClearMoveCmd("dropped", "path blocked");
+			}
+		}
+		if (g_has_move_cmd && g_move_queue.empty() && !player->IsMoving() && ExploreCanAct()) {
+			if (g_goto_confirm) {
+				if (g_goto_face) {
+					int dx = g_goto_tx - player->GetX();
+					int dy = g_goto_ty - player->GetY();
+					int dir = (dx == 1) ? 1 : (dx == -1) ? 3 : (dy == 1) ? 2 : (dy == -1) ? 0 : -1;
+					if (dir >= 0) {
+						player->SetDirection(dir);
+					}
+				}
+				player->AiCheckActionEvent();
+			}
+			ClearMoveCmd("applied", "");
+		}
+	}
+
+	// 2) Take in a fresh explore-domain command.
+	Command cmd;
+	if (ReadFreshCommand(cmd, 2)) {
+		if (cmd.state_id != g_last_id) {
+			Consume(cmd, "rejected", "stale state_id");
+		} else if (cmd.type == "move" || cmd.type == "confirm" || cmd.type == "goto") {
+			if (g_last_type != "explore") {
+				Consume(cmd, "rejected", "state is not an explore state");
+			} else if (g_has_move_cmd) {
+				Consume(cmd, "rejected", "movement in progress");
+			} else if (cmd.type == "confirm") {
+				bool hit = ExploreCanAct() && !player->IsMoving() && player->AiCheckActionEvent();
+				Consume(cmd, hit ? "applied" : "rejected", hit ? "" : "nothing triggered");
+			} else if (cmd.type == "move") {
+				int dir = DirFromName(cmd.dir);
+				if (dir < 0 || cmd.steps < 1 || cmd.steps > 60) {
+					Consume(cmd, "rejected", "invalid move (dir or steps)");
+				} else {
+					for (int i = 0; i < cmd.steps; ++i) {
+						g_move_queue.push_back(dir);
+					}
+					g_move_cmd = cmd;
+					g_has_move_cmd = true;
+					g_goto_confirm = false;
+					Consume(cmd, "accepted", "");
+				}
+			} else { // goto
+				if (cmd.point < 0 || cmd.point >= static_cast<int>(g_explore_points.size())) {
+					Consume(cmd, "rejected", "point index out of range");
+				} else {
+					const PointInfo& pt = g_explore_points[cmd.point];
+					std::vector<std::pair<int, int>> targets;
+					const bool is_action = pt.trigger == static_cast<int>(lcf::rpg::EventPage::Trigger_action);
+					// Below-layer action events (Ruina's points) are
+					// triggered standing ON them; same/above-layer ones
+					// by facing them from an adjacent tile.
+					const bool step_on = !is_action || pt.layer == 0;
+					if (is_action && !step_on) {
+						for (int dir = 0; dir < 4; ++dir) {
+							targets.push_back({pt.x + Game_Character::GetDxFromDirection(dir),
+									pt.y + Game_Character::GetDyFromDirection(dir)});
+						}
+					} else {
+						targets.push_back({pt.x, pt.y});
+					}
+					std::deque<int> path;
+					if (!FindPath(player->GetX(), player->GetY(), targets, path)) {
+						Consume(cmd, "rejected", "point unreachable");
+					} else {
+						g_move_queue = path;
+						g_move_cmd = cmd;
+						g_has_move_cmd = true;
+						g_goto_confirm = is_action;
+						g_goto_face = !step_on;
+						g_goto_tx = pt.x;
+						g_goto_ty = pt.y;
+						Consume(cmd, "accepted", "");
+					}
+				}
+			}
+		}
+		// Commands of other domains are left for their own polls.
+	}
+
+	// 3) Emit an explore state once the hero has settled.
+	const int hx = player->GetX();
+	const int hy = player->GetY();
+	if (hx == g_last_hx && hy == g_last_hy && !player->IsMoving()
+			&& g_move_queue.empty() && !g_has_move_cmd && ExploreCanAct()) {
+		++g_idle_frames;
+	} else {
+		g_idle_frames = 0;
+		g_last_hx = hx;
+		g_last_hy = hy;
+	}
+	if (g_idle_frames >= 15) {
+		g_idle_frames = 0;
+		auto pts = ComputePoints();
+		nlohmann::json state = BuildContext();
+		state["type"] = "explore";
+		nlohmann::json hero;
+		hero["x"] = hx;
+		hero["y"] = hy;
+		hero["facing"] = DirName(player->GetDirection());
+		state["hero"] = std::move(hero);
+		nlohmann::json arr = nlohmann::json::array();
+		for (size_t i = 0; i < pts.size(); ++i) {
+			nlohmann::json p;
+			p["index"] = static_cast<int>(i);
+			p["x"] = pts[i].x;
+			p["y"] = pts[i].y;
+			p["dx"] = pts[i].x - hx;
+			p["dy"] = pts[i].y - hy;
+			p["trigger"] = pts[i].trigger == static_cast<int>(lcf::rpg::EventPage::Trigger_action) ? "action" : "touch";
+			p["layer"] = pts[i].layer == 0 ? "below" : pts[i].layer == 2 ? "above" : "same";
+			arr.push_back(std::move(p));
+		}
+		state["points"] = std::move(arr);
+		if (Emit(std::move(state))) {
+			g_explore_points = std::move(pts);
+		}
+	}
 }
 
 } // namespace AiState

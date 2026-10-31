@@ -60,6 +60,17 @@ void PollMessageCommand(Window_Message* window);
  *  Returns true when a command was applied this frame. */
 bool PollNameCommand(Scene_Name* scene);
 
+/**
+ * Phase 3-A: per-frame exploration hook, called from the map scene.
+ * Polls explore-domain commands (move / confirm / goto), executes any
+ * queued movement through the player's own movement entry points, and
+ * emits an "explore" state once the hero has settled: hero position
+ * and facing, plus the currently displayed interaction points (events
+ * whose active page shows a sprite and uses an action/touch trigger),
+ * referenced by index and tile position only.
+ */
+void UpdateExplore();
+
 } // namespace AiState
 
 #endif

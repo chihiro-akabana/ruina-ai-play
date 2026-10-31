@@ -400,6 +400,10 @@ void Game_Player::Update() {
 	}
 }
 
+bool Game_Player::AiCheckActionEvent() {
+	return CheckActionEvent();
+}
+
 bool Game_Player::CheckActionEvent() {
 	if (IsFlying()) {
 		return false;
