@@ -427,6 +427,9 @@ void Window_Message::Update() {
 		return;
 	}
 
+	// Ruina text-play (Phase 2): poll for AI commands (advance / choose).
+	AiState::PollMessageCommand(this);
+
 	if (wait_count > 0) {
 		DebugLog("{}: MSG WAIT {}", wait_count);
 		--wait_count;
@@ -817,6 +820,34 @@ void Window_Message::InputChoice() {
 		// This disables choices
 		index = -1;
 	}
+}
+
+bool Window_Message::AiAdvance() {
+	if (!GetPause()) {
+		return false;
+	}
+	SetPause(false);
+	return true;
+}
+
+bool Window_Message::AiChoose(int choice_index) {
+	if (index < 0) {
+		return false; // choice not active (yet)
+	}
+	if (choice_index < 0 || choice_index >= pending_message.GetNumChoices()) {
+		return false;
+	}
+	if (!pending_message.IsChoiceEnabled(choice_index)) {
+		return false;
+	}
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	auto& continuation = pending_message.GetChoiceContinuation();
+	if (continuation) {
+		aop = continuation(choice_index);
+	}
+	// This disables choices
+	index = -1;
+	return true;
 }
 
 void Window_Message::InputNumber() {

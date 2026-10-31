@@ -1,10 +1,11 @@
-// See ai_state.h for the purpose and the spoiler policy of this module.
+// See ai_state.h for the purpose, wire format, and spoiler policy.
 
 #include "ai_state.h"
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,8 @@
 #include "game_party.h"
 #include "main_data.h"
 #include "pending_message.h"
+#include "scene_name.h"
+#include "window_message.h"
 
 namespace AiState {
 namespace {
@@ -25,6 +28,26 @@ bool g_enabled = false;
 std::string g_dir;
 std::string g_last_content;
 long g_counter = 0;
+
+// Latest emitted state, used to validate incoming commands.
+long g_last_id = 0;
+std::string g_last_type;
+std::vector<bool> g_last_choice_enabled;
+
+struct Command {
+	long seq = 0;
+	long state_id = 0;
+	std::string type;
+	int index = -1;
+	bool has_name = false;
+	std::string name;
+};
+
+long g_last_seq = 0;
+std::string g_cmd_raw_seen_msg;
+std::string g_cmd_raw_seen_name;
+bool g_has_pending = false;
+Command g_pending;
 
 /**
  * Removes presentation-only control codes (\c[..], \s[..], \>, \!, ...)
@@ -131,6 +154,43 @@ void EnsureInit() {
 	g_enabled = !ec;
 }
 
+void WriteFileAtomic(const std::string& final_path, const std::string& content) {
+	const std::string tmp_path = final_path + ".tmp";
+	{
+		std::ofstream out(tmp_path, std::ios::trunc);
+		out << content;
+	}
+	std::error_code ec;
+	std::filesystem::rename(tmp_path, final_path, ec);
+}
+
+void AppendLine(const std::string& path, const std::string& line) {
+	std::ofstream log(path, std::ios::app);
+	log << line << '\n';
+}
+
+void WriteAck(const Command& cmd, const char* status, const char* reason) {
+	nlohmann::json ack;
+	ack["seq"] = cmd.seq;
+	ack["state_id"] = cmd.state_id;
+	ack["type"] = cmd.type;
+	ack["status"] = status;
+	if (reason != nullptr && reason[0] != '\0') {
+		ack["reason"] = reason;
+	}
+	std::string line = ack.dump();
+	AppendLine(g_dir + "/commands.jsonl", line);
+	WriteFileAtomic(g_dir + "/ack.json", line + "\n");
+}
+
+void DropPending(const char* reason) {
+	if (!g_has_pending) {
+		return;
+	}
+	WriteAck(g_pending, "dropped", reason);
+	g_has_pending = false;
+}
+
 void Emit(nlohmann::json state) {
 	EnsureInit();
 	if (!g_enabled) {
@@ -142,20 +202,69 @@ void Emit(nlohmann::json state) {
 	}
 	g_last_content = content;
 
+	DropPending("state changed");
+
 	state["id"] = ++g_counter;
+	g_last_id = g_counter;
+	g_last_type = state.value("type", "");
+	g_last_choice_enabled.clear();
+	if (state.contains("choices")) {
+		for (const auto& c : state["choices"]) {
+			g_last_choice_enabled.push_back(c.value("enabled", true));
+		}
+	}
 	std::string line = state.dump();
 
-	{
-		std::ofstream log(g_dir + "/states.jsonl", std::ios::app);
-		log << line << '\n';
+	AppendLine(g_dir + "/states.jsonl", line);
+	WriteFileAtomic(g_dir + "/state.json", line + "\n");
+}
+
+/**
+ * Reads command.json when its content changed. Returns true when a
+ * fresh, not-yet-handled command is available. Commands from the other
+ * input domain (message window vs. name screen) are left untouched:
+ * each poll only consumes commands of its own domain, except that any
+ * poll may reject a command addressed to a stale state.
+ */
+bool ReadFreshCommand(Command& out, bool name_domain) {
+	std::ifstream in(g_dir + "/command.json");
+	if (!in) {
+		return false;
 	}
-	const std::string tmp_path = g_dir + "/state.json.tmp";
-	{
-		std::ofstream out(tmp_path, std::ios::trunc);
-		out << line << '\n';
+	std::stringstream ss;
+	ss << in.rdbuf();
+	std::string raw = ss.str();
+	// Each domain tracks the file content it has already seen, so a
+	// command left for the other domain is still picked up there.
+	std::string& seen = name_domain ? g_cmd_raw_seen_name : g_cmd_raw_seen_msg;
+	if (raw.empty() || raw == seen) {
+		return false;
 	}
-	std::error_code ec;
-	std::filesystem::rename(tmp_path, g_dir + "/state.json", ec);
+	seen = raw;
+
+	auto parsed = nlohmann::json::parse(raw, nullptr, false);
+	if (parsed.is_discarded() || !parsed.is_object()) {
+		return false;
+	}
+	Command cmd;
+	cmd.seq = parsed.value("seq", 0L);
+	cmd.state_id = parsed.value("state_id", 0L);
+	cmd.type = parsed.value("type", "");
+	cmd.index = parsed.value("index", -1);
+	if (parsed.contains("name") && parsed["name"].is_string()) {
+		cmd.has_name = true;
+		cmd.name = parsed["name"].get<std::string>();
+	}
+	if (cmd.seq <= 0 || cmd.seq <= g_last_seq || cmd.type.empty()) {
+		return false; // duplicate write or malformed: not a fresh command
+	}
+	out = cmd;
+	return true;
+}
+
+void Consume(const Command& cmd, const char* status, const char* reason) {
+	g_last_seq = cmd.seq;
+	WriteAck(cmd, status, reason);
 }
 
 } // namespace
@@ -265,6 +374,106 @@ void OnNumberInputStart(const PendingMessage& pm) {
 	state["text"] = JoinLines(context_lines);
 	state["digits"] = pm.GetNumberInputDigits();
 	Emit(std::move(state));
+}
+
+void OnNameInputStart(const std::string& current_name) {
+	EnsureInit();
+	if (!g_enabled) {
+		return;
+	}
+	nlohmann::json state = BuildContext();
+	state["type"] = "name_input";
+	state["text"] = "";
+	state["current_name"] = current_name;
+	Emit(std::move(state));
+}
+
+void PollMessageCommand(Window_Message* window) {
+	EnsureInit();
+	if (!g_enabled || window == nullptr) {
+		return;
+	}
+
+	Command cmd;
+	if (ReadFreshCommand(cmd, false)) {
+		if (cmd.state_id != g_last_id) {
+			Consume(cmd, "rejected", "stale state_id");
+		} else if (cmd.type == "advance") {
+			if (g_last_type == "message") {
+				DropPending("superseded");
+				g_pending = cmd;
+				g_has_pending = true;
+				Consume(cmd, "accepted", "");
+			} else {
+				Consume(cmd, "rejected", "state is not a message");
+			}
+		} else if (cmd.type == "choose") {
+			if (g_last_type != "choice") {
+				Consume(cmd, "rejected", "state is not a choice");
+			} else if (cmd.index < 0 || cmd.index >= static_cast<int>(g_last_choice_enabled.size())) {
+				Consume(cmd, "rejected", "choice index out of range");
+			} else if (!g_last_choice_enabled[cmd.index]) {
+				Consume(cmd, "rejected", "choice is disabled");
+			} else {
+				DropPending("superseded");
+				g_pending = cmd;
+				g_has_pending = true;
+				Consume(cmd, "accepted", "");
+			}
+		}
+		// Commands of the name-input domain are left for PollNameCommand.
+	}
+
+	if (g_has_pending) {
+		bool applied = false;
+		if (g_pending.type == "advance") {
+			applied = window->AiAdvance();
+		} else if (g_pending.type == "choose") {
+			applied = window->AiChoose(g_pending.index);
+		}
+		if (applied) {
+			WriteAck(g_pending, "applied", "");
+			g_has_pending = false;
+		}
+	}
+}
+
+bool PollNameCommand(Scene_Name* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return false;
+	}
+
+	Command cmd;
+	if (!ReadFreshCommand(cmd, true)) {
+		return false;
+	}
+	if (cmd.state_id != g_last_id) {
+		Consume(cmd, "rejected", "stale state_id");
+		return false;
+	}
+	if (cmd.type != "set_name" && cmd.type != "confirm_name") {
+		return false; // not this domain
+	}
+	if (g_last_type != "name_input") {
+		Consume(cmd, "rejected", "state is not a name_input");
+		return false;
+	}
+	const std::string* name = nullptr;
+	if (cmd.type == "set_name") {
+		if (!cmd.has_name) {
+			Consume(cmd, "rejected", "set_name without a name");
+			return false;
+		}
+		name = &cmd.name;
+	}
+	bool applied = scene->AiConfirmName(name);
+	if (applied) {
+		Consume(cmd, "applied", "");
+	} else {
+		Consume(cmd, "rejected", "name confirm failed");
+	}
+	return applied;
 }
 
 } // namespace AiState

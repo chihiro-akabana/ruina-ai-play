@@ -17,6 +17,7 @@
 
 #include <cassert>
 
+#include "ai_state.h"
 #include "scene_name.h"
 #include "game_actors.h"
 #include "game_system.h"
@@ -89,9 +90,32 @@ void Scene_Name::Start() {
 
 	kbd_window->Refresh();
 	kbd_window->UpdateCursorRect();
+
+	// Ruina text-play (Phase 2): announce the name-entry state.
+	AiState::OnNameInputStart(name_window->Get());
+}
+
+bool Scene_Name::AiConfirmName(const std::string* new_name) {
+	if (new_name != nullptr) {
+		name_window->Set(*new_name);
+		name_window->Refresh();
+	}
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	if (name_window->Get().empty()) {
+		actor.SetName(ToString(actor.GetName()));
+	} else {
+		actor.SetName(name_window->Get());
+	}
+	Scene::Pop();
+	return true;
 }
 
 void Scene_Name::vUpdate() {
+	// Ruina text-play (Phase 2): poll for AI name commands first.
+	if (AiState::PollNameCommand(this)) {
+		return;
+	}
+
 	kbd_window->Update();
 	name_window->Update();
 

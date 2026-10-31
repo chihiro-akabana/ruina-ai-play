@@ -37,6 +37,15 @@ public:
 	void Start() override;
 	void vUpdate() override;
 
+	/**
+	 * Ruina text-play: confirms the name entry directly, like selecting
+	 * the keyboard's DONE entry. When new_name is given it replaces the
+	 * current box content first; an empty result falls back to the
+	 * actor's current (default) name.
+	 * @return true when the name was confirmed and the scene popped.
+	 */
+	bool AiConfirmName(const std::string* new_name);
+
 protected:
 	std::vector<Window_Keyboard::Mode> layouts;
 	int layout_index = 0;

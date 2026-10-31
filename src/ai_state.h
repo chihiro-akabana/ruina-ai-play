@@ -1,12 +1,27 @@
 /*
- * AI state dump for the Ruina text-play project (Phase 1: read-only).
+ * AI state dump / command input for the Ruina text-play project.
  *
- * Emits the currently displayed message / choice / number-input state as
- * JSON whenever the message window reaches a decision point. Output goes
- * to the directory named by the environment variable EASYRPG_AI_STATE_DIR
- * (unset = disabled):
- *   - state.json   : latest state, replaced atomically
- *   - states.jsonl : append-only log of every emitted state
+ * Phase 1 (read-only): emits the currently displayed message / choice /
+ * number-input state as JSON whenever the message window reaches a
+ * decision point.
+ * Phase 2 (input): accepts commands from a file and applies them to the
+ * engine's internal state directly (no simulated key presses):
+ *   advance     - release the message pause (next page / close)
+ *   choose      - decide the active choice by index
+ *   set_name    - set and confirm the name on the name-entry screen
+ *   confirm_name- confirm the name-entry screen as-is
+ *
+ * Everything is enabled only when the environment variable
+ * EASYRPG_AI_STATE_DIR names a directory:
+ *   state.json    : latest state, replaced atomically
+ *   states.jsonl  : append-only log of every emitted state
+ *   command.json  : written by the bridge (tmp + rename); polled per frame
+ *   ack.json      : latest command disposition, replaced atomically
+ *   commands.jsonl: append-only log of every command disposition
+ *
+ * Commands carry the state id they answer and a sequence number; a
+ * command whose state id is not the latest emitted state is rejected
+ * as stale and never applied.
  *
  * Only information that is on screen (or inspectable through normal
  * menus) is emitted: displayed text, displayed choices, party status,
@@ -20,6 +35,8 @@
 #include <string>
 
 class PendingMessage;
+class Window_Message;
+class Scene_Name;
 
 namespace AiState {
 
@@ -31,6 +48,17 @@ void OnChoiceStart(const PendingMessage& pm);
 
 /** Called when a number input becomes active. */
 void OnNumberInputStart(const PendingMessage& pm);
+
+/** Called when the name-entry screen opens. current_name is the text
+ *  shown in the name box (the default name when pre-filled). */
+void OnNameInputStart(const std::string& current_name);
+
+/** Per-frame command polling for the message window (advance / choose). */
+void PollMessageCommand(Window_Message* window);
+
+/** Per-frame command polling for the name-entry screen.
+ *  Returns true when a command was applied this frame. */
+bool PollNameCommand(Scene_Name* scene);
 
 } // namespace AiState
 

@@ -112,6 +112,21 @@ public:
 	void InputChoice();
 
 	/**
+	 * Ruina text-play: applies an AI advance command by releasing the
+	 * message pause, exactly like a decision-key press at a pause.
+	 * @return true if the window was paused and the command applied.
+	 */
+	bool AiAdvance();
+
+	/**
+	 * Ruina text-play: applies an AI choice command by deciding the
+	 * active choice directly, mirroring the decision branch of
+	 * InputChoice (same sound effect and continuation call).
+	 * @return true if a choice was active and the command applied.
+	 */
+	bool AiChoose(int choice_index);
+
+	/**
 	 * Handles number input.
 	 */
 	void InputNumber();
