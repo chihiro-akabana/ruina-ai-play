@@ -52,6 +52,23 @@ public:
 
 	bool IsWindowMoving() const;
 
+	/**
+	 * Ruina text-play (Phase 3-C): choose a save/load slot by index,
+	 * through the same branch a decision-key press would take.
+	 * Returns false for invalid slots.
+	 */
+	bool AiDecideSlot(int slot_index);
+
+	/** Ruina text-play: the cancel action (leave the file screen). */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	int AiSlotCount() const { return static_cast<int>(file_windows.size()); }
+	Window_SaveFile* AiFileWindow(int slot_index) {
+		return slot_index >= 0 && slot_index < static_cast<int>(file_windows.size())
+				? file_windows[slot_index].get() : nullptr;
+	}
+
 protected:
 	virtual void CreateHelpWindow();
 	virtual void PopulateSaveWindow(Window_SaveFile& win, int id);

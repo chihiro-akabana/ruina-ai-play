@@ -18,6 +18,7 @@
 // Headers
 #include <string>
 #include <vector>
+#include "ai_state.h"
 #include "scene_status.h"
 #include "game_actors.h"
 #include "game_party.h"
@@ -57,7 +58,16 @@ void Scene_Status::Start() {
 	equip_window->SetIndex(-1);
 }
 
+bool Scene_Status::AiBack() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	Scene::Pop();
+	return true;
+}
+
 void Scene_Status::vUpdate() {
+	// Ruina text-play (Phase 3-C): status state output and back.
+	AiState::UpdateStatus(this);
+
 	gold_window->Update();
 	paramstatus_window->Update();
 	equip_window->Update();

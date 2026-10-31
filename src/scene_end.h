@@ -42,6 +42,19 @@ public:
 	void vUpdate() override;
 
 	/**
+	 * Ruina text-play (Phase 3-C): answer the confirmation by index
+	 * (0 = yes, 1 = no), through the same branch a decision-key press
+	 * would take.
+	 */
+	bool AiDecide(int index);
+
+	/** Ruina text-play: the cancel action (same as answering no). */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	Window_Command* AiCommandWindow() { return command_window.get(); }
+
+	/**
 	 * Creates the Window displaying the yes and no option.
 	 */
 	void CreateCommandWindow();

@@ -17,6 +17,7 @@
 
 // Headers
 #include "scene_equip.h"
+#include "ai_state.h"
 #include "game_actors.h"
 #include "game_party.h"
 #include "game_system.h"
@@ -63,7 +64,21 @@ void Scene_Equip::Start() {
 	equip_window->SetHelpWindow(help_window.get());
 }
 
+bool Scene_Equip::AiBack() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	if (item_window && item_window->GetActive()) {
+		equip_window->SetActive(true);
+		item_window->SetActive(false);
+	} else {
+		Scene::Pop();
+	}
+	return true;
+}
+
 void Scene_Equip::vUpdate() {
+	// Ruina text-play (Phase 3-C): equip state output and back.
+	AiState::UpdateEquip(this);
+
 	help_window->Update();
 
 	UpdateEquipWindow();

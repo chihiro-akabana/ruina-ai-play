@@ -44,6 +44,14 @@ public:
 	void Start() override;
 	void vUpdate() override;
 
+	/** Ruina text-play (Phase 3-C): the cancel action (back to the menu). */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	Game_Actor* AiActor() {
+		return actor_index >= 0 && actor_index < static_cast<int>(actors.size()) ? actors[actor_index] : nullptr;
+	}
+
 private:
 	std::vector<Game_Actor*> actors;
 	int actor_index;

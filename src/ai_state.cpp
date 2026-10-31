@@ -29,10 +29,25 @@
 #include "game_player.h"
 #include "main_data.h"
 #include "pending_message.h"
+#include "game_system.h"
+#include "scene_actortarget.h"
 #include "scene_battle_rpg2k.h"
+#include "scene_end.h"
+#include "scene_equip.h"
+#include "scene_file.h"
+#include "scene_item.h"
+#include "scene_load.h"
+#include "scene_menu.h"
 #include "scene_name.h"
+#include "scene_save.h"
+#include "scene_skill.h"
+#include "scene_status.h"
+#include "window_actortarget.h"
 #include "window_command.h"
+#include "window_item.h"
 #include "window_message.h"
+#include "window_savefile.h"
+#include "window_skill.h"
 
 namespace AiState {
 namespace {
@@ -64,7 +79,7 @@ struct Command {
 long g_last_seq = 0;
 // Command domains: 0 = message window, 1 = name screen, 2 = exploration,
 // 3 = battle selections.
-std::string g_cmd_raw_seen[4];
+std::string g_cmd_raw_seen[5];
 bool g_has_pending = false;
 Command g_pending;
 
@@ -676,11 +691,26 @@ void ClearMoveCmd(const char* status, const char* reason) {
 
 } // namespace
 
+// Phase 3-C: which scene family currently owns state output. When
+// it changes (a scene was entered or returned to), the dedupe key is
+// cleared once so the screen's state is emitted again with a fresh
+// id, even when its content is identical to the previous visit —
+// otherwise the bridge could not address commands to it.
+int g_hook_kind = 0;
+
+void SetHookKind(int kind) {
+	if (g_hook_kind != kind) {
+		g_hook_kind = kind;
+		g_last_content.clear();
+	}
+}
+
 void UpdateExplore() {
 	EnsureInit();
 	if (!g_enabled) {
 		return;
 	}
+	SetHookKind(1);
 	auto* player = Main_Data::game_player.get();
 	if (player == nullptr || player->IsPendingTeleport()) {
 		return;
@@ -720,7 +750,7 @@ void UpdateExplore() {
 	if (ReadFreshCommand(cmd, 2)) {
 		if (cmd.state_id != g_last_id) {
 			Consume(cmd, "rejected", "stale state_id");
-		} else if (cmd.type == "move" || cmd.type == "confirm" || cmd.type == "goto") {
+		} else if (cmd.type == "move" || cmd.type == "confirm" || cmd.type == "goto" || cmd.type == "menu") {
 			if (g_last_type != "explore") {
 				Consume(cmd, "rejected", "state is not an explore state");
 			} else if (g_has_move_cmd) {
@@ -740,6 +770,16 @@ void UpdateExplore() {
 					g_has_move_cmd = true;
 					g_goto_confirm = false;
 					Consume(cmd, "accepted", "");
+				}
+			} else if (cmd.type == "menu") {
+				// The menu key's own route (Game_Player::Update):
+				// SetMenuCalling, gated on the same conditions.
+				if (!Main_Data::game_system->GetAllowMenu() || Game_Message::IsMessageActive()
+						|| Game_Map::GetInterpreter().IsRunning()) {
+					Consume(cmd, "rejected", "menu is not available now");
+				} else {
+					player->SetMenuCalling(true);
+					Consume(cmd, "applied", "");
 				}
 			} else { // goto
 				if (cmd.point < 0 || cmd.point >= static_cast<int>(g_explore_points.size())) {
@@ -896,6 +936,7 @@ void UpdateBattle(Scene_Battle_Rpg2k* scene) {
 	if (!g_enabled || scene == nullptr) {
 		return;
 	}
+	SetHookKind(2);
 	const int st = scene->AiBattleState();
 	const int sub = scene->AiBattleSubState();
 	const int kStart = static_cast<int>(Scene_Battle::State_Start);
@@ -1033,6 +1074,387 @@ void UpdateBattle(Scene_Battle_Rpg2k* scene) {
 		}
 		// Other command types belong to other domains.
 	}
+}
+
+// ---------------------------------------------------------------------
+// Phase 3-C: menu family (domain 4).
+// ---------------------------------------------------------------------
+
+/** Party-actor status in the same shape BuildContext uses. */
+nlohmann::json ActorStatusJson(Game_Actor* actor) {
+	nlohmann::json a;
+	a["name"] = std::string(actor->GetName());
+	a["level"] = actor->GetLevel();
+	a["hp"] = actor->GetHp();
+	a["max_hp"] = actor->GetMaxHp();
+	a["sp"] = actor->GetSp();
+	a["max_sp"] = actor->GetMaxSp();
+	return a;
+}
+
+/**
+ * Shared choose/back intake for the menu family. Returns 1 when a
+ * choose for the expected state type was consumed, 2 for a back,
+ * and 0 when nothing was consumed. Validation mirrors the other
+ * domains: stale state ids are rejected, foreign command types are
+ * left for their own domains.
+ */
+int PollMenuCommand(const char* expected_type, Command& out_cmd) {
+	Command cmd;
+	if (!ReadFreshCommand(cmd, 4)) {
+		return 0;
+	}
+	if (cmd.state_id != g_last_id) {
+		Consume(cmd, "rejected", "stale state_id");
+		return 0;
+	}
+	if (cmd.type != "choose" && cmd.type != "back") {
+		return 0;
+	}
+	if (g_last_type != expected_type) {
+		Consume(cmd, "rejected", "state is not this menu screen");
+		return 0;
+	}
+	out_cmd = cmd;
+	return cmd.type == "back" ? 2 : 1;
+}
+
+void ConsumeMenuResult(const Command& cmd, bool ok, const char* fail_reason) {
+	Consume(cmd, ok ? "applied" : "rejected", ok ? "" : fail_reason);
+}
+
+void UpdateMenu(Scene_Menu* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(10);
+	const bool actor_sel = scene->AiIsActorSelection();
+	const char* type = actor_sel ? "menu_actor" : "menu";
+
+	Command cmd;
+	const int r = PollMenuCommand(type, cmd);
+	if (r == 1) {
+		ConsumeMenuResult(cmd, scene->AiDecide(cmd.index), "selection not applicable");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	nlohmann::json state = BuildContext();
+	state["type"] = actor_sel ? "menu_actor" : "menu";
+	if (actor_sel) {
+		nlohmann::json choices = nlohmann::json::array();
+		const auto& actors = Main_Data::game_party->GetActors();
+		for (size_t i = 0; i < actors.size(); ++i) {
+			nlohmann::json c;
+			c["index"] = static_cast<int>(i);
+			c["text"] = std::string(actors[i]->GetName());
+			c["enabled"] = true;
+			choices.push_back(std::move(c));
+		}
+		state["choices"] = std::move(choices);
+		if (scene->AiCommandWindow() != nullptr) {
+			// The command that led here is still the window's index.
+			// (Command window keeps its index during actor selection.)
+			state["for_option"] = scene->AiOptionAt(scene->AiCommandWindow()->GetIndex());
+		}
+	} else {
+		nlohmann::json choices = WindowChoices(scene->AiCommandWindow());
+		// The save entry's runtime gate (Game_System::GetAllowSave)
+		// is not part of the window's enabled flags; reflect it so
+		// the state shows the cave's disabled save honestly.
+		for (auto& c : choices) {
+			const int i = c.value("index", -1);
+			if (scene->AiOptionAt(i) == static_cast<int>(Scene_Menu::Save)) {
+				c["enabled"] = c.value("enabled", true) && Main_Data::game_system->GetAllowSave();
+			}
+		}
+		state["choices"] = std::move(choices);
+	}
+	Emit(std::move(state));
+}
+
+void UpdateMenuItem(Scene_Item* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(11);
+
+	Command cmd;
+	const int r = PollMenuCommand("menu_item", cmd);
+	if (r == 1) {
+		ConsumeMenuResult(cmd, scene->AiDecide(cmd.index), "item not usable");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	auto* win = scene->AiItemWindow();
+	if (win == nullptr) {
+		return;
+	}
+	nlohmann::json state = BuildContext();
+	state["type"] = "menu_item";
+	nlohmann::json choices = nlohmann::json::array();
+	const auto& data = win->AiData();
+	for (size_t i = 0; i < data.size(); ++i) {
+		const int item_id = data[i];
+		const auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, item_id);
+		nlohmann::json c;
+		c["index"] = static_cast<int>(i);
+		c["text"] = item != nullptr ? item->name : "";
+		c["count"] = Main_Data::game_party->GetItemCount(item_id);
+		c["enabled"] = win->CheckEnable(item_id);
+		choices.push_back(std::move(c));
+	}
+	state["choices"] = std::move(choices);
+	Emit(std::move(state));
+}
+
+void UpdateMenuSkill(Scene_Skill* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(12);
+
+	Command cmd;
+	const int r = PollMenuCommand("menu_skill", cmd);
+	if (r == 1) {
+		ConsumeMenuResult(cmd, scene->AiDecide(cmd.index), "skill not usable");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	auto* win = scene->AiSkillWindow();
+	auto* actor = scene->AiActor();
+	if (win == nullptr || actor == nullptr) {
+		return;
+	}
+	nlohmann::json state = BuildContext();
+	state["type"] = "menu_skill";
+	state["actor"] = ActorStatusJson(actor);
+	nlohmann::json choices = nlohmann::json::array();
+	const auto& data = win->AiData();
+	for (size_t i = 0; i < data.size(); ++i) {
+		const int skill_id = data[i];
+		const auto* skill = lcf::ReaderUtil::GetElement(lcf::Data::skills, skill_id);
+		nlohmann::json c;
+		c["index"] = static_cast<int>(i);
+		c["text"] = skill != nullptr ? skill->name : "";
+		c["cost"] = actor->CalculateSkillCost(skill_id);
+		c["enabled"] = win->CheckEnable(skill_id);
+		choices.push_back(std::move(c));
+	}
+	state["choices"] = std::move(choices);
+	Emit(std::move(state));
+}
+
+void UpdateActorTarget(Scene_ActorTarget* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(13);
+
+	Command cmd;
+	const int r = PollMenuCommand("menu_target", cmd);
+	if (r == 1) {
+		ConsumeMenuResult(cmd, scene->AiDecide(cmd.index), "target not applicable");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	auto* win = scene->AiTargetWindow();
+	if (win == nullptr) {
+		return;
+	}
+	nlohmann::json state = BuildContext();
+	state["type"] = "menu_target";
+	nlohmann::json for_obj;
+	for_obj["kind"] = scene->AiUseItem() ? "item" : "skill";
+	if (scene->AiUseItem()) {
+		const auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, scene->AiId());
+		for_obj["name"] = item != nullptr ? item->name : "";
+	} else {
+		const auto* skill = lcf::ReaderUtil::GetElement(lcf::Data::skills, scene->AiId());
+		for_obj["name"] = skill != nullptr ? skill->name : "";
+	}
+	state["for"] = std::move(for_obj);
+
+	const int win_index = win->GetIndex();
+	if (win_index == -100) {
+		state["target"] = "party";
+		state["choices"] = nlohmann::json::array();
+	} else if (win_index < 0) {
+		state["target"] = "self";
+		const auto& actors = Main_Data::game_party->GetActors();
+		const int ai = scene->AiActorIndex();
+		if (ai >= 0 && ai < static_cast<int>(actors.size())) {
+			state["target_actor"] = std::string(actors[ai]->GetName());
+		}
+		state["choices"] = nlohmann::json::array();
+	} else {
+		nlohmann::json choices = nlohmann::json::array();
+		const auto& actors = Main_Data::game_party->GetActors();
+		for (size_t i = 0; i < actors.size(); ++i) {
+			nlohmann::json c = ActorStatusJson(actors[i]);
+			c["index"] = static_cast<int>(i);
+			c["text"] = std::string(actors[i]->GetName());
+			c["enabled"] = true;
+			choices.push_back(std::move(c));
+		}
+		state["choices"] = std::move(choices);
+	}
+	Emit(std::move(state));
+}
+
+void UpdateFile(Scene_File* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(14);
+	const bool is_save = dynamic_cast<Scene_Save*>(scene) != nullptr;
+	const bool is_load = dynamic_cast<Scene_Load*>(scene) != nullptr;
+	if (!is_save && !is_load) {
+		return;
+	}
+	const char* type = is_save ? "menu_save" : "menu_load";
+
+	Command cmd;
+	const int r = PollMenuCommand(type, cmd);
+	if (r == 1) {
+		ConsumeMenuResult(cmd, scene->AiDecideSlot(cmd.index), "slot not valid");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	nlohmann::json state = BuildContext();
+	state["type"] = type;
+	nlohmann::json choices = nlohmann::json::array();
+	for (int i = 0; i < scene->AiSlotCount(); ++i) {
+		auto* win = scene->AiFileWindow(i);
+		nlohmann::json c;
+		c["index"] = i;
+		c["slot"] = i + 1;
+		// Occupancy comes from the loaded party data: Scene_Save
+		// blanket-sets has_save on every window, so it cannot be
+		// used; a slot shows a hero only when a save was loaded
+		// into it (or an error when the file is corrupted).
+		const bool occupied = win != nullptr && (win->HasParty() || win->AiCorrupted());
+		const bool corrupted = win != nullptr && win->AiCorrupted();
+		c["occupied"] = occupied;
+		if (corrupted) {
+			c["corrupted"] = true;
+		}
+		if (occupied && !corrupted && win != nullptr) {
+			const auto& title = win->AiTitle();
+			c["hero_name"] = title.hero_name;
+			c["hero_level"] = title.hero_level;
+			c["hero_hp"] = title.hero_hp;
+		}
+		c["text"] = "しおり " + std::to_string(i + 1);
+		c["enabled"] = is_save ? true : (occupied && !corrupted);
+		choices.push_back(std::move(c));
+	}
+	state["choices"] = std::move(choices);
+	Emit(std::move(state));
+}
+
+void UpdateEnd(Scene_End* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(15);
+
+	Command cmd;
+	const int r = PollMenuCommand("menu_end", cmd);
+	if (r == 1) {
+		ConsumeMenuResult(cmd, scene->AiDecide(cmd.index), "answer not applicable");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	nlohmann::json state = BuildContext();
+	state["type"] = "menu_end";
+	state["choices"] = WindowChoices(scene->AiCommandWindow());
+	Emit(std::move(state));
+}
+
+/** The actor's five equipment slots, as the equip/status screens show them. */
+nlohmann::json EquipmentJson(Game_Actor* actor) {
+	nlohmann::json eq = nlohmann::json::array();
+	for (int slot = 0; slot < 5; ++slot) {
+		nlohmann::json e;
+		e["slot"] = slot;
+		const auto* item = actor->GetEquipment(slot);
+		e["item"] = item != nullptr ? nlohmann::json(item->name) : nlohmann::json(nullptr);
+		eq.push_back(std::move(e));
+	}
+	return eq;
+}
+
+void UpdateEquip(Scene_Equip* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(16);
+
+	Command cmd;
+	const int r = PollMenuCommand("menu_equip", cmd);
+	if (r == 1) {
+		Consume(cmd, "rejected", "equip selection is not supported yet");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	auto* actor = scene->AiActor();
+	if (actor == nullptr) {
+		return;
+	}
+	nlohmann::json state = BuildContext();
+	state["type"] = "menu_equip";
+	state["actor"] = ActorStatusJson(actor);
+	state["level"] = scene->AiIsItemLevel() ? "item" : "slot";
+	state["equipment"] = EquipmentJson(actor);
+	Emit(std::move(state));
+}
+
+void UpdateStatus(Scene_Status* scene) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	SetHookKind(17);
+
+	Command cmd;
+	const int r = PollMenuCommand("menu_status", cmd);
+	if (r == 1) {
+		Consume(cmd, "rejected", "status screen has no selection");
+	} else if (r == 2) {
+		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
+	}
+
+	auto* actor = scene->AiActor();
+	if (actor == nullptr) {
+		return;
+	}
+	nlohmann::json state = BuildContext();
+	state["type"] = "menu_status";
+	nlohmann::json a = ActorStatusJson(actor);
+	a["class"] = std::string(actor->GetClassName());
+	a["exp"] = actor->GetExp();
+	a["next_exp"] = actor->GetNextExp();
+	a["atk"] = actor->GetAtk();
+	a["def"] = actor->GetDef();
+	a["spi"] = actor->GetSpi();
+	a["agi"] = actor->GetAgi();
+	a["equipment"] = EquipmentJson(actor);
+	state["actor"] = std::move(a);
+	Emit(std::move(state));
 }
 
 } // namespace AiState

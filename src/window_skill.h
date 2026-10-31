@@ -47,6 +47,9 @@ public:
 	 */
 	const lcf::rpg::Skill* GetSkill() const;
 
+	/** Ruina text-play: read-only access to the skill ids in display order. */
+	const std::vector<int>& AiData() const { return data; }
+
 	/**
 	 * Refreshes the skill list.
 	 */

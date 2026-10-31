@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <sstream>
 #include <vector>
+#include "ai_state.h"
 #include "baseui.h"
 #include "cache.h"
 #include <lcf/data.h>
@@ -175,7 +176,30 @@ void Scene_File::Refresh() {
 	}
 }
 
+bool Scene_File::AiDecideSlot(int slot_index) {
+	if (slot_index < 0 || slot_index >= static_cast<int>(file_windows.size())) {
+		return false;
+	}
+	index = slot_index;
+	if (!IsSlotValid(index)) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+		return false;
+	}
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	Action(index);
+	return true;
+}
+
+bool Scene_File::AiBack() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	Scene::Pop();
+	return true;
+}
+
 void Scene_File::vUpdate() {
+	// Ruina text-play (Phase 3-C): save/load state output and commands.
+	AiState::UpdateFile(this);
+
 	UpdateArrows();
 
 	if (IsWindowMoving()) {

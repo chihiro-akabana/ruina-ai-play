@@ -42,6 +42,22 @@ public:
 	void vUpdate() override;
 	void TransitionOut(SceneType next_scene) override;
 
+	/**
+	 * Ruina text-play (Phase 3-C): use the skill at the given list
+	 * index, through the same branch a decision-key press would take.
+	 * Returns false for invalid or disabled skills.
+	 */
+	bool AiDecide(int index);
+
+	/** Ruina text-play: the cancel action (back to the menu). */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	Window_Skill* AiSkillWindow() { return skill_window.get(); }
+	Game_Actor* AiActor() {
+		return actor_index >= 0 && actor_index < static_cast<int>(actors.size()) ? actors[actor_index] : nullptr;
+	}
+
 private:
 	std::vector<Game_Actor*> actors;
 	/** Actor in the vector whose skills are displayed. */

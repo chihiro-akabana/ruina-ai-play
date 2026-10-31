@@ -17,6 +17,7 @@
 
 // Headers
 #include <vector>
+#include "ai_state.h"
 #include "audio.h"
 #include "baseui.h"
 #include "cache.h"
@@ -40,7 +41,35 @@ void Scene_End::Start() {
 	CreateHelpWindow();
 }
 
+bool Scene_End::AiDecide(int index) {
+	if (index < 0 || index > 1) {
+		return false;
+	}
+	command_window->SetIndex(index);
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	if (index == 0) { // Yes
+		Main_Data::game_system->BgmFade(400);
+		if (target_scene == Scene::Title) {
+			Scene::ReturnToTitleScene();
+		} else {
+			Scene::PopUntil(target_scene);
+		}
+	} else { // No
+		Scene::Pop();
+	}
+	return true;
+}
+
+bool Scene_End::AiBack() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	Scene::Pop();
+	return true;
+}
+
 void Scene_End::vUpdate() {
+	// Ruina text-play (Phase 3-C): end-confirmation state and commands.
+	AiState::UpdateEnd(this);
+
 	command_window->Update();
 
 	if (Input::IsTriggered(Input::CANCEL)) {

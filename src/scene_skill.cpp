@@ -17,6 +17,7 @@
 
 // Headers
 #include "scene_skill.h"
+#include "ai_state.h"
 #include "algo.h"
 #include "game_actors.h"
 #include "game_map.h"
@@ -59,7 +60,60 @@ void Scene_Skill::Continue(SceneType) {
 	skill_window->Refresh();
 }
 
+bool Scene_Skill::AiDecide(int index) {
+	const auto& data = skill_window->AiData();
+	if (index < 0 || index >= static_cast<int>(data.size())) {
+		return false;
+	}
+	skill_window->SetIndex(index);
+	const lcf::rpg::Skill* skill = skill_window->GetSkill();
+	const int skill_id = skill ? skill->ID : 0;
+	auto& actor = *actors[actor_index];
+
+	if (!skill || !skill_window->CheckEnable(skill_id)) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+		return false;
+	}
+	if (skill->type == lcf::rpg::Skill::Type_switch) {
+		Main_Data::game_system->SePlay(skill->sound_effect);
+		Main_Data::game_party->UseSkill(skill_id, &actor, &actor);
+		Scene::PopUntil(Scene::Map);
+		Game_Map::SetNeedRefresh(true);
+		return true;
+	}
+	if (Algo::IsNormalOrSubskill(*skill)) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+		Scene::Push(std::make_shared<Scene_ActorTarget>(skill_id, actor_index));
+		skill_index = skill_window->GetIndex();
+		return true;
+	}
+	if (skill->type == lcf::rpg::Skill::Type_teleport) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+		Scene::Push(std::make_shared<Scene_Teleport>(actor, *skill));
+		return true;
+	}
+	if (skill->type == lcf::rpg::Skill::Type_escape) {
+		Main_Data::game_system->SePlay(skill->sound_effect);
+		Main_Data::game_party->UseSkill(skill_id, &actor, &actor);
+		Main_Data::game_player->ForceGetOffVehicle();
+		Main_Data::game_player->ReserveTeleport(Main_Data::game_targets->GetEscapeTarget());
+		Scene::PopUntil(Scene::Map);
+		return true;
+	}
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+	return false;
+}
+
+bool Scene_Skill::AiBack() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	Scene::Pop();
+	return true;
+}
+
 void Scene_Skill::vUpdate() {
+	// Ruina text-play (Phase 3-C): skill state output and commands.
+	AiState::UpdateMenuSkill(this);
+
 	help_window->Update();
 	skillstatus_window->Update();
 	skill_window->Update();

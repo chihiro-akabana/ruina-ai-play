@@ -17,6 +17,7 @@
 
 // Headers
 #include "scene_actortarget.h"
+#include "ai_state.h"
 #include "game_actors.h"
 #include "game_party.h"
 #include "game_system.h"
@@ -93,7 +94,82 @@ void Scene_ActorTarget::Start() {
 	}
 }
 
+bool Scene_ActorTarget::AiDecide(int index) {
+	auto se_buzzer = []() {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+	};
+	if (target_window->GetIndex() >= 0) {
+		if (index < 0 || index >= static_cast<int>(Main_Data::game_party->GetActors().size())) {
+			return false;
+		}
+		target_window->SetIndex(index);
+	}
+	bool ok = false;
+	if (use_item) {
+		if (Main_Data::game_party->GetItemCount(id) <= 0) {
+			se_buzzer();
+			return false;
+		}
+		if (Main_Data::game_party->UseItem(id, target_window->GetActor())) {
+			ok = true;
+			auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, id);
+			assert(item);
+			bool do_skill = (item->type == lcf::rpg::Item::Type_special)
+					|| (item->use_skill && (
+							item->type == lcf::rpg::Item::Type_weapon
+							|| item->type == lcf::rpg::Item::Type_shield
+							|| item->type == lcf::rpg::Item::Type_armor
+							|| item->type == lcf::rpg::Item::Type_helmet
+							|| item->type == lcf::rpg::Item::Type_accessory
+						)
+					   );
+			if (do_skill) {
+				auto* skill = lcf::ReaderUtil::GetElement(lcf::Data::skills, item->skill_id);
+				assert(skill);
+				auto* animation = lcf::ReaderUtil::GetElement(lcf::Data::animations, skill->animation_id);
+				if (animation) {
+					Main_Data::game_system->SePlay(*animation);
+				}
+			} else {
+				Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_UseItem));
+			}
+		} else {
+			se_buzzer();
+		}
+	} else {
+		Game_Actor* actor = &(*Main_Data::game_party)[actor_index];
+		if (actor->GetSp() < actor->CalculateSkillCost(id) || actor->GetHp() <= actor->CalculateSkillHpCost(id)) {
+			se_buzzer();
+			return false;
+		}
+		if (Main_Data::game_party->UseSkill(id, actor, target_window->GetActor())) {
+			ok = true;
+			lcf::rpg::Skill* skill = lcf::ReaderUtil::GetElement(lcf::Data::skills, id);
+			lcf::rpg::Animation* animation = lcf::ReaderUtil::GetElement(lcf::Data::animations, skill->animation_id);
+			if (animation) {
+				Main_Data::game_system->SePlay(*animation);
+			} else {
+				Output::Warning("UpdateSkill: Skill {} references invalid animation {}", id, skill->animation_id);
+			}
+		} else {
+			se_buzzer();
+		}
+	}
+	status_window->Refresh();
+	target_window->Refresh();
+	return ok;
+}
+
+bool Scene_ActorTarget::AiBack() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	Scene::Pop();
+	return true;
+}
+
 void Scene_ActorTarget::vUpdate() {
+	// Ruina text-play (Phase 3-C): target state output and commands.
+	AiState::UpdateActorTarget(this);
+
 	help_window->Update();
 	target_window->Update();
 	status_window->Update();

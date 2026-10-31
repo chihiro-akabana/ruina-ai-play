@@ -74,6 +74,11 @@ public:
 	 */
 	bool HasParty() const;
 
+	/** Ruina text-play: read-only access to the displayed slot summary. */
+	const lcf::rpg::SaveTitle& AiTitle() const { return data; }
+	bool AiHasSave() const { return has_save; }
+	bool AiCorrupted() const { return corrupted; }
+
 	/**
 	 * Sets if there is a savegame in the slot.
 	 *

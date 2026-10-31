@@ -37,6 +37,14 @@
 class PendingMessage;
 class Window_Message;
 class Scene_Battle_Rpg2k;
+class Scene_Menu;
+class Scene_Item;
+class Scene_Skill;
+class Scene_ActorTarget;
+class Scene_File;
+class Scene_End;
+class Scene_Equip;
+class Scene_Status;
 class Scene_Name;
 
 namespace AiState {
@@ -84,6 +92,25 @@ void UpdateExplore();
  * selection dispatch.
  */
 void UpdateBattle(Scene_Battle_Rpg2k* scene);
+
+/**
+ * Ruina text-play (Phase 3-C): called every frame from the menu
+ * family scenes' vUpdate. Each emits its screen as a state (menu /
+ * menu_actor, menu_item, menu_skill, menu_target, menu_save,
+ * menu_load, menu_end, menu_equip, menu_status) and consumes
+ * choose/back commands (domain 4) through the scene's own selection
+ * code. The explore state also accepts a "menu" command that opens
+ * the menu (Game_Player::SetMenuCalling), like the menu key.
+ * Equip/status are state output + back only for now.
+ */
+void UpdateMenu(Scene_Menu* scene);
+void UpdateMenuItem(Scene_Item* scene);
+void UpdateMenuSkill(Scene_Skill* scene);
+void UpdateActorTarget(Scene_ActorTarget* scene);
+void UpdateFile(Scene_File* scene);
+void UpdateEnd(Scene_End* scene);
+void UpdateEquip(Scene_Equip* scene);
+void UpdateStatus(Scene_Status* scene);
 
 } // namespace AiState
 

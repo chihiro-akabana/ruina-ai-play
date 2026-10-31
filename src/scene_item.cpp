@@ -17,6 +17,7 @@
 
 // Headers
 #include "scene_item.h"
+#include "ai_state.h"
 #include "game_map.h"
 #include "game_party.h"
 #include "game_player.h"
@@ -51,7 +52,72 @@ void Scene_Item::Continue(SceneType /* prev_scene */) {
 	item_window->Refresh();
 }
 
+bool Scene_Item::AiDecide(int index) {
+	const auto& data = item_window->AiData();
+	if (index < 0 || index >= static_cast<int>(data.size())) {
+		return false;
+	}
+	item_window->SetIndex(index);
+	const int item_id = data[index];
+
+	if (item_id <= 0 || !item_window->CheckEnable(item_id)) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+		return false;
+	}
+	const lcf::rpg::Item& item = *item_window->GetItem();
+
+	if (item.type == lcf::rpg::Item::Type_switch) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+		Main_Data::game_party->ConsumeItemUse(item_id);
+		Main_Data::game_switches->Set(item.switch_id, true);
+		Scene::PopUntil(Scene::Map);
+		Game_Map::SetNeedRefresh(true);
+		return true;
+	}
+	if (item.type == lcf::rpg::Item::Type_special && item.skill_id > 0) {
+		const lcf::rpg::Skill* skill = lcf::ReaderUtil::GetElement(lcf::Data::skills, item.skill_id);
+		if (!skill) {
+			Output::Warning("Scene Item: Item references invalid skill ID {}", item.skill_id);
+			return false;
+		}
+		if (skill->type == lcf::rpg::Skill::Type_teleport) {
+			Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+			Scene::Push(std::make_shared<Scene_Teleport>(item, *skill));
+			return true;
+		}
+		if (skill->type == lcf::rpg::Skill::Type_escape) {
+			Main_Data::game_party->ConsumeItemUse(item_id);
+			Main_Data::game_system->SePlay(skill->sound_effect);
+			Main_Data::game_player->ForceGetOffVehicle();
+			Main_Data::game_player->ReserveTeleport(Main_Data::game_targets->GetEscapeTarget());
+			Scene::PopUntil(Scene::Map);
+			return true;
+		}
+		if (skill->type == lcf::rpg::Skill::Type_switch) {
+			Main_Data::game_party->ConsumeItemUse(item_id);
+			Main_Data::game_system->SePlay(skill->sound_effect);
+			Main_Data::game_switches->Set(item.switch_id, true);
+			Scene::PopUntil(Scene::Map);
+			Game_Map::SetNeedRefresh(true);
+			return true;
+		}
+	}
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	Scene::Push(std::make_shared<Scene_ActorTarget>(item_id));
+	item_index = item_window->GetIndex();
+	return true;
+}
+
+bool Scene_Item::AiBack() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	Scene::Pop();
+	return true;
+}
+
 void Scene_Item::vUpdate() {
+	// Ruina text-play (Phase 3-C): item state output and commands.
+	AiState::UpdateMenuItem(this);
+
 	help_window->Update();
 	item_window->Update();
 

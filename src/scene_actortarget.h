@@ -50,6 +50,25 @@ public:
 	void vUpdate() override;
 
 	/**
+	 * Ruina text-play (Phase 3-C): apply the pending item/skill to
+	 * the actor at the given party index, through the same code the
+	 * decision-key branch runs. For whole-party or self targets the
+	 * target is preset by the scene and the index is ignored.
+	 * Returns false when the use fails (e.g. no items left, not
+	 * enough SP).
+	 */
+	bool AiDecide(int index);
+
+	/** Ruina text-play: the cancel action (back to the item/skill list). */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	Window_ActorTarget* AiTargetWindow() { return target_window.get(); }
+	int AiId() const { return id; }
+	bool AiUseItem() const { return use_item; }
+	int AiActorIndex() const { return actor_index; }
+
+	/**
 	 * Update function used when an item will be used.
 	 */
 	void UpdateItem();

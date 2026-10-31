@@ -46,6 +46,20 @@ public:
 	void vUpdate() override;
 
 	/**
+	 * Ruina text-play (Phase 3-C): the cancel action (item level
+	 * back to the slot level, slot level back to the menu).
+	 * Equipment changes themselves are not command-driven yet; the
+	 * scene is state-output and back only.
+	 */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	Game_Actor* AiActor() {
+		return actor_index >= 0 && actor_index < static_cast<int>(actors.size()) ? actors[actor_index] : nullptr;
+	}
+	bool AiIsItemLevel() { return item_window && item_window->GetActive(); }
+
+	/**
 	 * Updates the item windows.
 	 */
 	void UpdateItemWindows();

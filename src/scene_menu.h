@@ -41,6 +41,25 @@ public:
 	void vUpdate() override;
 
 	/**
+	 * Ruina text-play (Phase 3-C): apply a selection by index to the
+	 * currently active selection (command window or actor selection),
+	 * through the same branch a decision-key press would take.
+	 * Returns false for invalid or disabled selections.
+	 */
+	bool AiDecide(int index);
+
+	/** Ruina text-play: the cancel action (close menu / back to commands). */
+	bool AiBack();
+
+	/** Ruina text-play: read-only accessors for state output. */
+	bool AiIsActorSelection() const { return menustatus_window && menustatus_window->GetActive(); }
+	Window_Command* AiCommandWindow() { return command_window.get(); }
+	int AiOptionAt(int index) const {
+		return index >= 0 && index < static_cast<int>(command_options.size())
+				? static_cast<int>(command_options[index]) : -1;
+	}
+
+	/**
 	 * Creates the window displaying the options.
 	 */
 	void CreateCommandWindow();

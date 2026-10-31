@@ -17,6 +17,7 @@
 
 // Headers
 #include <cassert>
+#include "ai_state.h"
 #include "scene_menu.h"
 #include "audio.h"
 #include "cache.h"
@@ -61,7 +62,151 @@ void Scene_Menu::Continue(SceneType /* prev_scene */) {
 	gold_window->Refresh();
 }
 
+bool Scene_Menu::AiDecide(int index) {
+	auto se_decision = []() {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	};
+	auto se_buzzer = []() {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+	};
+	if (command_window->GetActive()) {
+		if (index < 0 || index >= static_cast<int>(command_options.size())) {
+			return false;
+		}
+		if (index < static_cast<int>(command_window->AiCommandsEnabled().size())
+				&& !command_window->AiCommandsEnabled()[index]) {
+			return false;
+		}
+		command_window->SetIndex(index);
+		menu_index = index;
+		switch (command_options[index]) {
+			case Item:
+				if (Main_Data::game_party->GetActors().empty()) {
+					se_buzzer();
+					return false;
+				}
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Item>());
+				return true;
+			case Skill:
+			case Equipment:
+			case Status:
+			case Row:
+				if (Main_Data::game_party->GetActors().empty()) {
+					se_buzzer();
+					return false;
+				}
+				se_decision();
+				command_window->SetActive(false);
+				menustatus_window->SetActive(true);
+				menustatus_window->SetIndex(0);
+				return true;
+			case Save:
+				if (!Main_Data::game_system->GetAllowSave()) {
+					se_buzzer();
+					return false;
+				}
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Save>());
+				return true;
+			case Order:
+				if (Main_Data::game_party->GetActors().size() <= 1) {
+					se_buzzer();
+					return false;
+				}
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Order>());
+				return true;
+			case Wait:
+				se_decision();
+				Main_Data::game_system->ToggleAtbMode();
+				command_window->SetItemText(menu_index,
+						Main_Data::game_system->GetAtbMode() == lcf::rpg::SaveSystem::AtbMode_atb_wait ? lcf::Data::terms.wait_on : lcf::Data::terms.wait_off);
+				return true;
+			case Settings:
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Settings>());
+				return true;
+			case Debug:
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Debug>());
+				return true;
+			case Quit:
+				se_decision();
+				Scene::Push(std::make_shared<Scene_End>());
+				return true;
+		}
+		return false;
+	}
+	if (menustatus_window->GetActive()) {
+		const auto& actors = Main_Data::game_party->GetActors();
+		if (index < 0 || index >= static_cast<int>(actors.size())) {
+			return false;
+		}
+		menustatus_window->SetIndex(index);
+		switch (command_options[command_window->GetIndex()]) {
+			case Skill:
+				if (!menustatus_window->GetActor()->CanAct()) {
+					se_buzzer();
+					return false;
+				}
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Skill>(actors, index));
+				return true;
+			case Equipment:
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Equip>(actors, index));
+				return true;
+			case Status:
+				se_decision();
+				Scene::Push(std::make_shared<Scene_Status>(actors, index));
+				return true;
+			case Row: {
+				se_decision();
+				int num_in_back = 0;
+				for (auto* a : actors) {
+					if (a->GetBattleRow() == Game_Actor::RowType::RowType_back) {
+						++num_in_back;
+					}
+				}
+				Game_Actor* actor = actors[index];
+				if (actor->GetBattleRow() == Game_Actor::RowType::RowType_front) {
+					if (num_in_back < static_cast<int>(actors.size() - 1)) {
+						actor->SetBattleRow(Game_Actor::RowType::RowType_back);
+					}
+				} else {
+					actor->SetBattleRow(Game_Actor::RowType::RowType_front);
+				}
+				menustatus_window->Refresh();
+				return true;
+			}
+			default:
+				return false;
+		}
+	}
+	return false;
+}
+
+bool Scene_Menu::AiBack() {
+	if (command_window->GetActive()) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+		Scene::Pop();
+		return true;
+	}
+	if (menustatus_window->GetActive()) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+		command_window->SetActive(true);
+		menustatus_window->SetActive(false);
+		menustatus_window->SetIndex(-1);
+		return true;
+	}
+	return false;
+}
+
 void Scene_Menu::vUpdate() {
+	// Ruina text-play (Phase 3-C): menu state output and commands.
+	AiState::UpdateMenu(this);
+
 	command_window->Update();
 	gold_window->Update();
 	menustatus_window->Update();
