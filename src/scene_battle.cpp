@@ -20,6 +20,7 @@
 #include <sstream>
 
 #include "bitmap.h"
+#include "ai_state.h"
 #include "input.h"
 #include "output.h"
 #include "player.h"
@@ -610,6 +611,9 @@ void Scene_Battle::SelectionFlash(Game_Battler* battler) {
 
 void Scene_Battle::EndBattle(BattleResult result) {
 	assert(Scene::instance.get() == this && "EndBattle called multiple times!");
+
+	// Ruina text-play: observe the explicit result before the scene is popped.
+	AiState::OnBattleEnd(dynamic_cast<Scene_Battle_Rpg2k*>(this), result);
 
 	Main_Data::game_party->IncBattleCount();
 	switch (result) {

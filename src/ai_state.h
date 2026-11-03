@@ -46,6 +46,7 @@ class Scene_End;
 class Scene_Equip;
 class Scene_Status;
 class Scene_Name;
+enum class BattleResult;
 
 namespace AiState {
 
@@ -85,13 +86,18 @@ void UpdateExplore();
  * scene. Emits battle decision states (option / command / skill /
  * item / enemy or ally target) when the scene waits for input, with
  * the battle narration since the previous decision attached as a
- * compact log. On victory/defeat the result is not emitted as its
- * own state (that would orphan the still-pending result message);
- * it is attached to the next emitted state as "last_battle".
+ * compact log. Victory/defeat/escape results are attached to every
+ * emitted state as "last_battle" through the first explore state.
+ * Existing result, battle_seq and log keys are preserved; additive
+ * summary_lines contains the displayed victory/defeat message lines,
+ * including rewards and level-ups when the game shows them.
  * Applies "choose" and "back" commands through the scene's own
  * selection dispatch.
  */
 void UpdateBattle(Scene_Battle_Rpg2k* scene);
+
+/** Explicit battle resolution hook; Abort never creates a result. */
+void OnBattleEnd(Scene_Battle_Rpg2k* scene, BattleResult result);
 
 /**
  * Ruina text-play (Phase 3-C): called every frame from the menu

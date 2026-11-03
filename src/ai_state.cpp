@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <queue>
 #include <sstream>
 #include <string>
@@ -106,15 +107,18 @@ int g_last_hy = -1;
 std::vector<std::string> g_battle_prev_lines;
 std::vector<std::string> g_battle_log;
 bool g_battle_result_sent = false;
-// The finished battle's result, attached to the next emitted state
-// (whatever it is) as "last_battle" instead of being emitted as a
-// state of its own: a standalone result state would displace a
-// still-pending victory/defeat message state and orphan it.
+// The finished battle's result is attached as "last_battle" until an
+// explore state has delivered it. A standalone result state would
+// displace a still-pending victory/defeat message and orphan it.
 bool g_battle_pending = false;
 std::string g_battle_pending_result;
 std::vector<std::string> g_battle_pending_log;
-bool g_battle_active = false;
+std::vector<std::string> g_battle_pending_summary_lines;
+long g_battle_pending_seq = 0;
+std::weak_ptr<Scene> g_battle_scene;
 long g_battle_seq = 0;
+
+void CaptureBattleResult(Scene_Battle_Rpg2k* scene, const char* result);
 
 /**
  * Removes presentation-only control codes (\c[..], \s[..], \>, \!, ...)
@@ -263,11 +267,13 @@ bool Emit(nlohmann::json state) {
 	if (!g_enabled) {
 		return false;
 	}
-	if (g_battle_pending && !state.contains("last_battle")) {
+	const bool attached_battle = g_battle_pending && !state.contains("last_battle");
+	if (attached_battle) {
 		nlohmann::json bundle;
 		bundle["result"] = g_battle_pending_result;
-		bundle["battle_seq"] = g_battle_seq;
+		bundle["battle_seq"] = g_battle_pending_seq;
 		bundle["log"] = g_battle_pending_log;
+		bundle["summary_lines"] = g_battle_pending_summary_lines;
 		state["last_battle"] = std::move(bundle);
 	}
 	std::string content = state.dump();
@@ -275,11 +281,6 @@ bool Emit(nlohmann::json state) {
 		return false; // unchanged state: suppress (token-cost rule from the plan)
 	}
 	g_last_content = content;
-	if (state.contains("last_battle")) {
-		g_battle_pending = false;
-		g_battle_pending_log.clear();
-	}
-
 	DropPending("state changed");
 
 	state["id"] = ++g_counter;
@@ -295,6 +296,11 @@ bool Emit(nlohmann::json state) {
 
 	AppendLine(g_dir + "/states.jsonl", line);
 	WriteFileAtomic(g_dir + "/state.json", line + "\n");
+	if (attached_battle && state.value("type", "") == "explore") {
+		g_battle_pending = false;
+		g_battle_pending_log.clear();
+		g_battle_pending_summary_lines.clear();
+	}
 	return true;
 }
 
@@ -399,6 +405,18 @@ void OnMessageStart(const PendingMessage& pm, const std::string& assembled_text)
 	}
 	if (all_lines.empty()) {
 		return;
+	}
+
+	// Victory/defeat substate 1 waits for the result PendingMessage.
+	// Capture the assembled display text, including reward and level-up
+	// pages, before Emit attaches the bundle to this very message state.
+	auto* battle = dynamic_cast<Scene_Battle_Rpg2k*>(Scene::instance.get());
+	if (battle != nullptr && battle->AiBattleSubState() == 1) {
+		const int st = battle->AiBattleState();
+		if (st == Scene_Battle::State_Victory || st == Scene_Battle::State_Defeat) {
+			CaptureBattleResult(battle, st == Scene_Battle::State_Victory ? "victory" : "defeat");
+			g_battle_pending_summary_lines = all_lines;
+		}
 	}
 
 	nlohmann::json state = BuildContext();
@@ -861,6 +879,19 @@ void UpdateExplore() {
 
 namespace {
 
+void BeginBattle(Scene_Battle_Rpg2k* scene) {
+	if (g_battle_scene.lock().get() == scene) {
+		return;
+	}
+	// Weak ownership also distinguishes a new battle after a load/title
+	// abort, even if its scene happens to reuse the same address.
+	g_battle_scene = Scene::Find(Scene::Battle);
+	++g_battle_seq;
+	g_battle_result_sent = false;
+	g_battle_log.clear();
+	g_battle_prev_lines.clear();
+}
+
 bool IsBattleDecisionType(const std::string& t) {
 	return t == "battle_option" || t == "battle_command" || t == "battle_skill"
 			|| t == "battle_item" || t == "battle_target" || t == "battle_target_ally";
@@ -902,6 +933,21 @@ void CaptureBattleLog(Scene_Battle_Rpg2k* scene) {
 	g_battle_prev_lines = std::move(clean);
 }
 
+void CaptureBattleResult(Scene_Battle_Rpg2k* scene, const char* result) {
+	BeginBattle(scene);
+	CaptureBattleLog(scene);
+	if (g_battle_result_sent && g_battle_pending_result == result) {
+		return;
+	}
+	g_battle_result_sent = true;
+	g_battle_pending = true;
+	g_battle_pending_result = result;
+	g_battle_pending_seq = g_battle_seq;
+	g_battle_pending_log = g_battle_log;
+	g_battle_pending_summary_lines.clear();
+	g_battle_log.clear();
+}
+
 nlohmann::json WindowChoices(Window_Command* win) {
 	nlohmann::json arr = nlohmann::json::array();
 	if (win == nullptr) {
@@ -931,6 +977,33 @@ nlohmann::json BattleEnemies() {
 
 } // namespace
 
+void OnBattleEnd(Scene_Battle_Rpg2k* scene, BattleResult result) {
+	EnsureInit();
+	if (!g_enabled || scene == nullptr) {
+		return;
+	}
+	BeginBattle(scene);
+	switch (result) {
+		case BattleResult::Escape:
+			CaptureBattleResult(scene, "escape");
+			break;
+		case BattleResult::Victory:
+			CaptureBattleResult(scene, "victory");
+			break;
+		case BattleResult::Defeat:
+			CaptureBattleResult(scene, "defeat");
+			break;
+		case BattleResult::Abort:
+			// Discard any provisional victory/defeat from this battle.
+			if (g_battle_pending && g_battle_pending_seq == g_battle_seq) {
+				g_battle_pending = false;
+				g_battle_pending_log.clear();
+				g_battle_pending_summary_lines.clear();
+			}
+			break;
+	}
+}
+
 void UpdateBattle(Scene_Battle_Rpg2k* scene) {
 	EnsureInit();
 	if (!g_enabled || scene == nullptr) {
@@ -939,33 +1012,17 @@ void UpdateBattle(Scene_Battle_Rpg2k* scene) {
 	SetHookKind(2);
 	const int st = scene->AiBattleState();
 	const int sub = scene->AiBattleSubState();
-	const int kStart = static_cast<int>(Scene_Battle::State_Start);
 	const int kVictory = static_cast<int>(Scene_Battle::State_Victory);
 	const int kDefeat = static_cast<int>(Scene_Battle::State_Defeat);
 
-	if (st == kStart && !g_battle_active) {
-		g_battle_active = true;
-		++g_battle_seq;
-		g_battle_result_sent = false;
-		g_battle_log.clear();
-		g_battle_prev_lines.clear();
-	}
+	BeginBattle(scene);
 
 	CaptureBattleLog(scene);
 
-	// At victory / defeat, stash the result for the next emitted
-	// state (see g_battle_pending). Emitting a standalone result
-	// state here would orphan the victory/defeat message state that
-	// was emitted just before, while it still waits for "advance".
-	// (Escape resolves through the following states instead: a failed
-	// escape returns to the option state, a successful one ends the
-	// scene and the map states resume.)
+	// Stash victory/defeat without displacing their message state.
+	// Escape is captured only by OnBattleEnd's explicit result hook.
 	if ((st == kVictory || st == kDefeat) && !g_battle_result_sent) {
-		g_battle_result_sent = true;
-		g_battle_pending = true;
-		g_battle_pending_result = st == kVictory ? "victory" : "defeat";
-		g_battle_pending_log = g_battle_log;
-		g_battle_log.clear();
+		CaptureBattleResult(scene, st == kVictory ? "victory" : "defeat");
 	}
 
 	// Decision states: built every frame while the scene waits for
