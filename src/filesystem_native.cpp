@@ -35,6 +35,12 @@
 #  include <fcntl.h>
 #endif
 
+#if defined(_WIN32)
+#  include <sys/stat.h>
+#  include <fcntl.h>
+#  include <io.h>
+#endif
+
 NativeFilesystem::NativeFilesystem(std::string base_path, FilesystemView parent_fs) : Filesystem(std::move(base_path), parent_fs) {
 }
 
@@ -55,7 +61,18 @@ int64_t NativeFilesystem::GetFilesize(std::string_view path) const {
 }
 
 std::streambuf* NativeFilesystem::CreateInputStreambuffer(std::string_view path, std::ios_base::openmode mode) const {
-#ifdef USE_CUSTOM_FILEBUF
+#if defined(_WIN32)
+	// std::filebuf with a narrow path would reinterpret the UTF-8 name in the
+	// ANSI codepage, and the MinGW wide filebuf open is unusable. Open with
+	// the CRT wide API and reuse the fd stream buffer instead.
+	(void)mode;
+	int fd = _wopen(Utils::ToWideString(path).c_str(), _O_RDONLY | _O_BINARY);
+	if (fd < 0) {
+		return nullptr;
+	}
+
+	return new Filesystem_Stream::FdStreamBuf(fd, true);
+#elif defined(USE_CUSTOM_FILEBUF)
 	(void)mode;
 	int fd = open(ToString(path).c_str(), O_RDONLY);
 	if (fd < 0) {
@@ -84,7 +101,22 @@ std::streambuf* NativeFilesystem::CreateInputStreambuffer(std::string_view path,
 }
 
 std::streambuf* NativeFilesystem::CreateOutputStreambuffer(std::string_view path, std::ios_base::openmode mode) const {
-#ifdef USE_CUSTOM_FILEBUF
+#if defined(_WIN32)
+	int flags = _O_WRONLY | _O_CREAT | _O_BINARY;
+
+	if ((mode & std::ios_base::app) == std::ios_base::app) {
+		flags |= _O_APPEND;
+	} else {
+		flags |= _O_TRUNC;
+	}
+
+	int fd = _wopen(Utils::ToWideString(path).c_str(), flags, _S_IREAD | _S_IWRITE);
+	if (fd < 0) {
+		return nullptr;
+	}
+
+	return new Filesystem_Stream::FdStreamBuf(fd, false);
+#elif defined(USE_CUSTOM_FILEBUF)
 	int flags = O_TRUNC;
 
 	if ((mode & std::ios_base::app) == std::ios_base::app) {

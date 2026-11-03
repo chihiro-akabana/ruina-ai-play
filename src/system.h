@@ -82,6 +82,10 @@
 #  define SUPPORT_JOYSTICK
 #  define SUPPORT_JOYSTICK_AXIS
 #  define SUPPORT_FILE_BROWSER
+#  ifndef _MSC_VER
+// MinGW: no usable wide std::filebuf, use the fd stream buffer with _wopen
+#    define USE_CUSTOM_FILEBUF 16 * 1024
+#  endif
 #elif defined(__SWITCH__)
 #  define SUPPORT_JOYSTICK
 #  define SUPPORT_JOYSTICK_AXIS
