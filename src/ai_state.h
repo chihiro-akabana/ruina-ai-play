@@ -26,6 +26,13 @@
  * It saves the just-drawn native frame as capture.png with capture.json
  * metadata, only when EASYRPG_AI_CAPTURE=1 was set at bridge init.
  * Otherwise it is consumed and rejected with detail "capture disabled".
+ * The closed command type set is advance, back, capture, choose, confirm,
+ * confirm_name, goto, menu, move, set_name. A fresh unknown type is consumed
+ * once and rejected with reason "unknown command type" by the first
+ * non-capture poll that reads it. Known types retain their scene routing:
+ * an inapplicable type stays silent so a later applicable scene can read it
+ * (existing stale-state checks still apply). Capture is read only by its
+ * own poll, which never consumes another type.
  *
  * Only information that is on screen (or inspectable through normal
  * menus) is emitted: displayed text, displayed choices, party status,

@@ -314,6 +314,14 @@ bool Emit(nlohmann::json state) {
 	return true;
 }
 
+bool IsKnownCommandType(const std::string& type) {
+	return type == "advance" || type == "back" || type == "capture"
+		|| type == "choose" || type == "confirm" || type == "confirm_name"
+		|| type == "goto" || type == "menu" || type == "move" || type == "set_name";
+}
+
+void Consume(const Command& cmd, const char* status, const char* reason);
+
 /**
  * Reads command.json when its content changed. Returns true when a
  * fresh, not-yet-handled command is available. Commands from the other
@@ -370,6 +378,10 @@ bool ReadFreshCommand(Command& out, int domain) {
 	}
 	if (cmd.seq <= 0 || cmd.seq <= g_last_seq || cmd.type.empty()) {
 		return false; // duplicate write or malformed: not a fresh command
+	}
+	if (!IsKnownCommandType(cmd.type)) {
+		Consume(cmd, "rejected", "unknown command type");
+		return false;
 	}
 	out = cmd;
 	return true;
