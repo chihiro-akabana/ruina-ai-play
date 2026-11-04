@@ -69,6 +69,7 @@ bool Scene_Equip::AiBack() {
 	if (item_window && item_window->GetActive()) {
 		equip_window->SetActive(true);
 		item_window->SetActive(false);
+		item_window->SetIndex(-1);
 	} else {
 		Scene::Pop();
 	}
@@ -76,7 +77,7 @@ bool Scene_Equip::AiBack() {
 }
 
 void Scene_Equip::vUpdate() {
-	// Ruina text-play (Phase 3-C): equip state output and back.
+	// Bridge state and explicit selections.
 	AiState::UpdateEquip(this);
 
 	help_window->Update();
@@ -109,65 +110,72 @@ void Scene_Equip::UpdateStatusWindow() {
 	if (equip_window->GetActive()) {
 		equipstatus_window->ClearParameters();
 	} else if (item_window->GetActive()) {
-		const lcf::rpg::Item* current_item = item_window->GetItem();
+		auto params = AiPreview();
 
-		const auto eidx = equip_window->GetIndex();
-		const auto& actor = *actors[actor_index];
-
-		auto atk = actor.GetBaseAtk(Game_Battler::WeaponAll, true, false);
-		auto def = actor.GetBaseDef(Game_Battler::WeaponAll, true, false);
-		auto spi = actor.GetBaseSpi(Game_Battler::WeaponAll, true, false);
-		auto agi = actor.GetBaseAgi(Game_Battler::WeaponAll, true, false);
-
-		auto add_item = [&](const lcf::rpg::Item* item, int mod = 1) {
-			if (item) {
-				atk += item->atk_points1 * mod;
-				def += item->def_points1 * mod;
-				spi += item->spi_points1 * mod;
-				agi += item->agi_points1 * mod;
-			}
-		};
-
-		for (int i = 1; i <= 5; i++) {
-			auto* count_item = actor.GetEquipment(i);
-			add_item(count_item, 1);
-		}
-
-		auto* old_item = actor.GetEquipment(eidx + 1);
-		// If its a weapon or shield, get the other hand
-		const lcf::rpg::Item* other_old_item = nullptr;
-		if (eidx == 0) {
-			other_old_item = actor.GetEquipment(eidx + 2);
-		} else if (eidx == 1) {
-			other_old_item = actor.GetEquipment(eidx);
-		}
-
-		add_item(old_item, -1);
-		// If other hand had a two handed weapon, or we considering a 2 handed weapon, remove the other hand.
-		if (current_item && other_old_item &&
-				((other_old_item->type == lcf::rpg::Item::Type_weapon && other_old_item->two_handed) || (current_item->type == lcf::rpg::Item::Type_weapon && current_item->two_handed))) {
-			add_item(other_old_item, -1);
-		}
-		add_item(current_item, 1);
-
-		int limit = actor.MaxStatBaseValue();
-
-		atk = Utils::Clamp(atk, 1, limit);
-		def = Utils::Clamp(def, 1, limit);
-		spi = Utils::Clamp(spi, 1, limit);
-		agi = Utils::Clamp(agi, 1, limit);
-
-		atk = actor.CalcValueAfterAtkStates(atk);
-		def = actor.CalcValueAfterDefStates(def);
-		spi = actor.CalcValueAfterSpiStates(spi);
-		agi = actor.CalcValueAfterAgiStates(agi);
-
-		equipstatus_window->SetNewParameters(atk, def, spi, agi);
+		equipstatus_window->SetNewParameters(params[0], params[1], params[2], params[3]);
 
 		equipstatus_window->Refresh();
 	}
 
 	equipstatus_window->Update();
+}
+
+std::array<int, 4> Scene_Equip::AiPreview(int index) const {
+	const auto* window = item_windows[equip_window->GetIndex()].get();
+	const lcf::rpg::Item* current_item = index < 0 ? window->GetItem()
+		: lcf::ReaderUtil::GetElement(lcf::Data::items, window->AiData()[index]);
+
+	const auto eidx = equip_window->GetIndex();
+	const auto& actor = *actors[actor_index];
+
+	auto atk = actor.GetBaseAtk(Game_Battler::WeaponAll, true, false);
+	auto def = actor.GetBaseDef(Game_Battler::WeaponAll, true, false);
+	auto spi = actor.GetBaseSpi(Game_Battler::WeaponAll, true, false);
+	auto agi = actor.GetBaseAgi(Game_Battler::WeaponAll, true, false);
+
+	auto add_item = [&](const lcf::rpg::Item* item, int mod = 1) {
+		if (item) {
+			atk += item->atk_points1 * mod;
+			def += item->def_points1 * mod;
+			spi += item->spi_points1 * mod;
+			agi += item->agi_points1 * mod;
+		}
+	};
+
+	for (int i = 1; i <= 5; i++) {
+		auto* count_item = actor.GetEquipment(i);
+		add_item(count_item, 1);
+	}
+
+	auto* old_item = actor.GetEquipment(eidx + 1);
+	// If its a weapon or shield, get the other hand
+	const lcf::rpg::Item* other_old_item = nullptr;
+	if (eidx == 0) {
+		other_old_item = actor.GetEquipment(eidx + 2);
+	} else if (eidx == 1) {
+		other_old_item = actor.GetEquipment(eidx);
+	}
+
+	add_item(old_item, -1);
+	// If other hand had a two handed weapon, or we considering a 2 handed weapon, remove the other hand.
+	if (current_item && other_old_item &&
+			((other_old_item->type == lcf::rpg::Item::Type_weapon && other_old_item->two_handed) || (current_item->type == lcf::rpg::Item::Type_weapon && current_item->two_handed))) {
+		add_item(other_old_item, -1);
+	}
+	add_item(current_item, 1);
+
+	int limit = actor.MaxStatBaseValue();
+
+	atk = Utils::Clamp(atk, 1, limit);
+	def = Utils::Clamp(def, 1, limit);
+	spi = Utils::Clamp(spi, 1, limit);
+	agi = Utils::Clamp(agi, 1, limit);
+
+	atk = actor.CalcValueAfterAtkStates(atk);
+	def = actor.CalcValueAfterDefStates(def);
+	spi = actor.CalcValueAfterSpiStates(spi);
+	agi = actor.CalcValueAfterAgiStates(agi);
+	return {atk, def, spi, agi};
 }
 
 static bool CanRemoveEquipment(const Game_Actor& actor, int index) {
@@ -186,16 +194,7 @@ void Scene_Equip::UpdateEquipSelection() {
 		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
 		Scene::Pop();
 	} else if (Input::IsTriggered(Input::DECISION)) {
-		const auto& actor = *actors[actor_index];
-		if (!CanRemoveEquipment(actor, equip_window->GetIndex())) {
-			Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
-			return;
-		}
-
-		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
-		equip_window->SetActive(false);
-		item_window->SetActive(true);
-		item_window->SetIndex(0);
+		SelectSlot();
 	} else if (actors.size() > 1 && Input::IsTriggered(Input::RIGHT)) {
 		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cursor));
 		actor_index = (actor_index + 1) % actors.size();
@@ -217,23 +216,60 @@ void Scene_Equip::UpdateItemSelection() {
 		item_window->SetActive(false);
 		item_window->SetIndex(-1);
 	} else if (Input::IsTriggered(Input::DECISION)) {
-		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
-
-		const lcf::rpg::Item* current_item = item_window->GetItem();
-		int current_item_id = current_item ? current_item->ID : 0;
-		auto& actor = *actors[actor_index];
-
-		actor.ChangeEquipment(
-			equip_window->GetIndex() + 1, current_item_id);
-
-		equip_window->SetActive(true);
-		item_window->SetActive(false);
-		item_window->SetIndex(-1);
-
-		equip_window->Refresh();
-
-		for (size_t i = 0; i < item_windows.size(); ++i) {
-			item_windows[i]->Refresh();
-		}
+		EquipSelectedItem();
 	}
+}
+
+// Shared UI actions: all equipment writes stay on the native scene path.
+bool Scene_Equip::SelectSlot() {
+	const auto& actor = *actors[actor_index];
+	if (!CanRemoveEquipment(actor, equip_window->GetIndex())) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+		return false;
+	}
+
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+	equip_window->SetActive(false);
+	item_window->SetActive(true);
+	item_window->SetIndex(0);
+	return true;
+}
+
+void Scene_Equip::EquipSelectedItem() {
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+
+	const lcf::rpg::Item* current_item = item_window->GetItem();
+	int current_item_id = current_item ? current_item->ID : 0;
+	auto& actor = *actors[actor_index];
+
+	actor.ChangeEquipment(
+		equip_window->GetIndex() + 1, current_item_id);
+
+	equip_window->SetActive(true);
+	item_window->SetActive(false);
+	item_window->SetIndex(-1);
+
+	equip_window->Refresh();
+
+	for (size_t i = 0; i < item_windows.size(); ++i) {
+		item_windows[i]->Refresh();
+	}
+}
+
+const char* Scene_Equip::AiDecide(int index) {
+	if (!AiIsItemLevel()) {
+		if (index < 0 || index >= 5) return "slot index out of range";
+		if (!CanRemoveEquipment(*actors[actor_index], index)) return "equipment is fixed or cursed";
+		equip_window->SetIndex(index);
+		item_window = item_windows[index];
+		SelectSlot();
+	} else {
+		const auto& data = item_window->AiData();
+		if (index < 0 || index >= static_cast<int>(data.size())) return "candidate index out of range";
+		if (!CanRemoveEquipment(*actors[actor_index], AiSlot())) return "equipment is fixed or cursed";
+		if (!item_window->CheckInclude(data[index]) || !item_window->CheckEnable(data[index])) return "candidate is not equippable";
+		item_window->SetIndex(index);
+		EquipSelectedItem();
+	}
+	return nullptr;
 }

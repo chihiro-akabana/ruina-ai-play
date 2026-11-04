@@ -124,7 +124,7 @@ void OnBattleEnd(Scene_Battle_Rpg2k* scene, BattleResult result);
  * choose/back commands (domain 4) through the scene's own selection
  * code. The explore state also accepts a "menu" command that opens
  * the menu (Game_Player::SetMenuCalling), like the menu key.
- * Equip/status are state output + back only for now.
+ * Equip supports slot/item choose and back; status supports back only.
  */
 void UpdateMenu(Scene_Menu* scene);
 void UpdateMenuItem(Scene_Item* scene);

@@ -1284,7 +1284,7 @@ nlohmann::json ActorStatusJson(Game_Actor* actor) {
  * domains: stale state ids are rejected, foreign command types are
  * left for their own domains.
  */
-int PollMenuCommand(const char* expected_type, Command& out_cmd) {
+int PollMenuCommand(const char* expected_type, Command& out_cmd, bool strict = false) {
 	Command cmd;
 	if (!ReadFreshCommand(cmd, 4)) {
 		return 0;
@@ -1294,6 +1294,7 @@ int PollMenuCommand(const char* expected_type, Command& out_cmd) {
 		return 0;
 	}
 	if (cmd.type != "choose" && cmd.type != "back") {
+		if (strict) Consume(cmd, "rejected", "command is not applicable to this screen");
 		return 0;
 	}
 	if (g_last_type != expected_type) {
@@ -1589,9 +1590,10 @@ void UpdateEquip(Scene_Equip* scene) {
 	SetHookKind(16);
 
 	Command cmd;
-	const int r = PollMenuCommand("menu_equip", cmd);
+	const int r = PollMenuCommand("menu_equip", cmd, true);
 	if (r == 1) {
-		Consume(cmd, "rejected", "equip selection is not supported yet");
+		const char* error = scene->AiDecide(cmd.index);
+		Consume(cmd, error ? "rejected" : "applied", error);
 	} else if (r == 2) {
 		ConsumeMenuResult(cmd, scene->AiBack(), "cannot go back");
 	}
@@ -1603,8 +1605,36 @@ void UpdateEquip(Scene_Equip* scene) {
 	nlohmann::json state = BuildContext();
 	state["type"] = "menu_equip";
 	state["actor"] = ActorStatusJson(actor);
+	state["actor"]["atk"] = actor->GetAtk();
+	state["actor"]["def"] = actor->GetDef();
+	state["actor"]["spi"] = actor->GetSpi();
+	state["actor"]["agi"] = actor->GetAgi();
 	state["level"] = scene->AiIsItemLevel() ? "item" : "slot";
-	state["equipment"] = EquipmentJson(actor);
+	state["slot"] = scene->AiSlot();
+	// Equipment access is one-based, while protocol slots are zero-based.
+	state["equipment"] = nlohmann::json::array();
+	for (int slot = 0; slot < 5; ++slot) {
+		const auto* item = actor->GetEquipment(slot + 1);
+		state["equipment"].push_back({{"slot", slot}, {"item", item ? nlohmann::json(item->name) : nlohmann::json(nullptr)}});
+	}
+	if (scene->AiIsItemLevel()) {
+		auto* window = scene->AiItemWindow();
+		state["index"] = window->GetIndex();
+		state["candidates"] = nlohmann::json::array();
+		const auto& data = window->AiData();
+		for (size_t i = 0; i < data.size(); ++i) {
+			const auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, data[i]);
+			auto p = scene->AiPreview(static_cast<int>(i));
+			nlohmann::json candidate = {{"index", i}, {"name", item ? nlohmann::json(item->name) : nlohmann::json(nullptr)}, {"remove", item == nullptr},
+				{"preview", {{"atk", p[0]}, {"def", p[1]}, {"spi", p[2]}, {"agi", p[3]}}}};
+			if (item) candidate["count"] = Main_Data::game_party->GetItemCount(item->ID);
+			state["candidates"].push_back(std::move(candidate));
+		}
+		if (window->GetIndex() >= 0 && window->GetIndex() < static_cast<int>(data.size())) {
+			auto p = scene->AiPreview();
+			state["preview"] = {{"atk", p[0]}, {"def", p[1]}, {"spi", p[2]}, {"agi", p[3]}};
+		}
+	}
 	Emit(std::move(state));
 }
 

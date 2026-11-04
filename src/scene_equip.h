@@ -20,6 +20,7 @@
 
 // Headers
 #include <vector>
+#include <array>
 #include "scene.h"
 #include "window_equipitem.h"
 #include "window_equip.h"
@@ -45,13 +46,14 @@ public:
 	void Start() override;
 	void vUpdate() override;
 
-	/**
-	 * Ruina text-play (Phase 3-C): the cancel action (item level
-	 * back to the slot level, slot level back to the menu).
-	 * Equipment changes themselves are not command-driven yet; the
-	 * scene is state-output and back only.
-	 */
+	/** Bridge selections use the same helpers as the keyboard handlers.
+	 * Returns nullptr on success, otherwise a rejection reason. */
+	const char* AiDecide(int index);
 	bool AiBack();
+	Window_EquipItem* AiItemWindow() { return item_windows[equip_window->GetIndex()].get(); }
+	int AiSlot() const { return equip_window->GetIndex(); }
+	/** Exact totals drawn to the right of the arrows (including states/caps). */
+	std::array<int, 4> AiPreview(int index = -1) const;
 
 	/** Ruina text-play: read-only accessors for state output. */
 	Game_Actor* AiActor() {
@@ -85,6 +87,8 @@ public:
 	void UpdateItemSelection();
 
 private:
+	bool SelectSlot();
+	void EquipSelectedItem();
 	std::vector<Game_Actor*> actors;
 	/** Index of the actor in the party whose equipment is displayed. */
 	int actor_index;
