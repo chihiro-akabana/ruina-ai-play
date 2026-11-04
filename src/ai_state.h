@@ -105,6 +105,9 @@ void UpdateExplore();
  * Existing result, battle_seq and log keys are preserved; additive
  * summary_lines contains the displayed victory/defeat message lines,
  * including rewards and level-ups when the game shows them.
+ * The ordinary result message may precede the bundle; its assembled
+ * lines are retained for that battle's subsequent result observation.
+ * Escape has no result message and keeps summary_lines empty.
  * Applies "choose" and "back" commands through the scene's own
  * selection dispatch.
  */

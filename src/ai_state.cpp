@@ -112,6 +112,10 @@ int g_last_hy = -1;
 std::vector<std::string> g_battle_prev_lines;
 std::vector<std::string> g_battle_log;
 bool g_battle_result_sent = false;
+// Displayed result text can arrive before UpdateBattle observes the outcome.
+// Keep it with the current battle until its result bundle is created.
+std::string g_battle_summary_result;
+std::vector<std::string> g_battle_summary_lines;
 // The finished battle's result is attached as "last_battle" until an
 // explore state has delivered it. A standalone result state would
 // displace a still-pending victory/defeat message and orphan it.
@@ -123,6 +127,7 @@ long g_battle_pending_seq = 0;
 std::weak_ptr<Scene> g_battle_scene;
 long g_battle_seq = 0;
 
+void BeginBattle(Scene_Battle_Rpg2k* scene);
 void CaptureBattleResult(Scene_Battle_Rpg2k* scene, const char* result);
 
 /**
@@ -518,15 +523,22 @@ void OnMessageStart(const PendingMessage& pm, const std::string& assembled_text)
 		return;
 	}
 
-	// Victory/defeat substate 1 waits for the result PendingMessage.
-	// Capture the assembled display text, including reward and level-up
-	// pages, before Emit attaches the bundle to this very message state.
+	// Victory/defeat's eBegin (0) calls SetPendingMessage synchronously:
+	// this hook runs BEFORE the handler switches to eEnd (1). Save only
+	// that assembled result text, not messages from other battle phases.
+	// Do not create a bundle here: the normal message can precede the
+	// next UpdateBattle poll that observes the outcome.
 	auto* battle = dynamic_cast<Scene_Battle_Rpg2k*>(Scene::instance.get());
-	if (battle != nullptr && battle->AiBattleSubState() == 1) {
+	if (battle != nullptr && battle->AiBattleSubState() == 0) {
 		const int st = battle->AiBattleState();
 		if (st == Scene_Battle::State_Victory || st == Scene_Battle::State_Defeat) {
-			CaptureBattleResult(battle, st == Scene_Battle::State_Victory ? "victory" : "defeat");
-			g_battle_pending_summary_lines = all_lines;
+			BeginBattle(battle);
+			g_battle_summary_result = st == Scene_Battle::State_Victory ? "victory" : "defeat";
+			g_battle_summary_lines = all_lines;
+			if (g_battle_pending && g_battle_pending_seq == g_battle_seq
+					&& g_battle_pending_result == g_battle_summary_result) {
+				g_battle_pending_summary_lines = all_lines;
+			}
 		}
 	}
 
@@ -1001,6 +1013,8 @@ void BeginBattle(Scene_Battle_Rpg2k* scene) {
 	g_battle_result_sent = false;
 	g_battle_log.clear();
 	g_battle_prev_lines.clear();
+	g_battle_summary_result.clear();
+	g_battle_summary_lines.clear();
 }
 
 bool IsBattleDecisionType(const std::string& t) {
@@ -1055,7 +1069,8 @@ void CaptureBattleResult(Scene_Battle_Rpg2k* scene, const char* result) {
 	g_battle_pending_result = result;
 	g_battle_pending_seq = g_battle_seq;
 	g_battle_pending_log = g_battle_log;
-	g_battle_pending_summary_lines.clear();
+	g_battle_pending_summary_lines = g_battle_summary_result == result
+		? g_battle_summary_lines : std::vector<std::string>{};
 	g_battle_log.clear();
 }
 
@@ -1105,6 +1120,8 @@ void OnBattleEnd(Scene_Battle_Rpg2k* scene, BattleResult result) {
 			CaptureBattleResult(scene, "defeat");
 			break;
 		case BattleResult::Abort:
+			g_battle_summary_result.clear();
+			g_battle_summary_lines.clear();
 			// Discard any provisional victory/defeat from this battle.
 			if (g_battle_pending && g_battle_pending_seq == g_battle_seq) {
 				g_battle_pending = false;
