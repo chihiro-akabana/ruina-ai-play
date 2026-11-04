@@ -55,3 +55,70 @@ with a deterministic RPG2k3 database fixture, not the Ruina actor setup.
 `menu_equip` schema additions and its slot correction intentionally change equip
 observations even without equip commands; byte identity is checked on unchanged
 legacy paths, excluding this explicitly extended state.
+
+## B — shop
+
+`Scene_Shop::vUpdate` now calls `AiState::UpdateShop`. The hook emits `shop`
+with phases `menu`, `buy`, `sell`, `quantity`, `confirm`, `bought`, `sold`
+(and `leave` if observed), with gold throughout. Menu text comes from the
+shop's localized terms; buy/sell lists retain native ordering, highlighted
+indices and disabled entries. Buy entries contain name/price/count/equipped;
+sell entries contain name/price/count. There are no item IDs in the protocol.
+Quantity/confirm carry transaction action, item name, count, unit price, total,
+and resulting gold (including the engine's gold cap).
+
+Command mapping:
+
+- Menu `choose index=0/1/2`: buy/sell/leave.
+- Buy/sell `choose index`: zero-based displayed item row.
+- Quantity `choose index=N`: literal quantity N, starting at 1. This freezes
+  the native quantity panel and emits `phase: confirm`; no money/items move.
+- `confirm` against that emitted confirm state calls the extracted native
+  `ExecuteTransaction` routine. Confirm before the summary was emitted is
+  rejected. Quantities/items are revalidated before execution.
+- `back` from quantity/confirm cancels to buy/sell; other backs follow native
+  menu/exit behavior. Choose at confirm is rejected. A decision key cannot
+  execute a bridge-staged purchase/sale, either before or after its summary.
+
+Keyboard and bridge share the original `SelectBuyItem`, `SelectSellItem` and
+`ExecuteTransaction` bodies in `src/scene_shop.cpp/.h`. Accessors in
+`window_shop.h` expose the menu's displayed terms/index; `window_shopnumber.*`
+exposes pending values and a bounded quantity setter. Staging flags apply only
+to bridge-staged trades; native keyboard-only shopping keeps its original flow.
+The command vocabulary is unchanged. Unknown/misplaced commands in shop are
+consumed once and rejected, including insufficient money/full inventory,
+unsellable items, invalid quantities/indices and stale state IDs.
+
+Verification actually run:
+
+- Incremental native Release build passed.
+- Native harness: equip 19 checks; shop fixture 30 checks, including purchase,
+  sale, cancellation both ways, no effects at confirm, explicit confirm,
+  prevention of native-decision bypass and confirmation before emission,
+  duplicate confirm, native bought/sold timers, bad/stale/misplaced/unknown
+  commands, insufficient gold and inventory full.
+- Real Ruina database and real shop definition: Map0003.lmu, event 23, 22
+  goods; 50 checks passed before the additional pre-emission test (repeated
+  in final verification). Every good's name/value/count matched the loaded
+  database and native windows; purchase, sale and cancellation were exercised.
+- `run_shop_compat.py /tmp/followup-b-committed-build /tmp/menu-shop-key-build`:
+  131-frame native keyboard-only shop gameplay traces were byte-identical to
+  the base build, including gold, inventory and transaction continuation.
+- `run_battle.py`: all 77 checks passed. `git diff --check` passed.
+- Legacy command differential is also run against imported `c905abf` (see
+  final verification). Its old bridge is given an inert shop linkage adapter;
+  those scenarios never enter a shop. The independent native shop differential
+  links the entire actual base build without adapters.
+
+Intentional observation changes: shop now emits states where the base emitted
+none. Those new states and A's extended equip state necessarily differ when
+visiting those screens without commands; unchanged legacy paths retain byte
+identity. The confirm stage freezes the existing quantity screen rather than
+adding a new graphical window. Sell includes the screen's disabled unsellable
+rows with `enabled: false` so displayed row indices stay faithful.
+
+Headless limitation: the reduced liblcf dependency was built without ICU and
+rejects CP932. The real-data harness uses its supported windows-1252 decoder;
+it verifies real goods/prices and native transactions but does not verify
+Japanese text rendering/decoding. No live co-play, event-interpreter traversal
+to the shop, screenshots, or Windows build was run.

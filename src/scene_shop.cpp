@@ -21,6 +21,7 @@
 #include "input.h"
 #include <lcf/reader_util.h>
 #include "scene_shop.h"
+#include "ai_state.h"
 #include "output.h"
 
 Scene_Shop::Scene_Shop(
@@ -190,6 +191,10 @@ void Scene_Shop::SetMode(int nmode) {
 }
 
 void Scene_Shop::vUpdate() {
+	AiState::UpdateShop(this);
+	// A bridge-staged summary is immutable until confirm/back. In particular,
+	// a physical or bridge decision pulse cannot execute a staged transaction.
+	if (ai_confirm) return;
 	buy_window->Update();
 	sell_window->Update();
 	shop_window->Update();
@@ -255,26 +260,7 @@ void Scene_Shop::UpdateBuySelection() {
 			Scene::Pop();
 		}
 	} else if (Input::IsTriggered(Input::DECISION)) {
-		int item_id = buy_window->GetItemId();
-
-		// checks the money and number of items possessed before buy
-		if (buy_window->CheckEnable(item_id)) {
-			Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
-
-			// Items are guaranteed to be valid
-			const lcf::rpg::Item* item = lcf::ReaderUtil::GetElement(lcf::Data::items, item_id);
-
-			int max = Main_Data::game_party->GetMaxItemCount(item_id) - Main_Data::game_party->GetItemCount(item_id);
-			if (item->price > 0) {
-				max = std::min<int>(max, Main_Data::game_party->GetGold() / item->price);
-			}
-			number_window->SetData(item_id, max, item->price);
-
-			SetMode(BuyHowMany);
-		}
-		else {
-			Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
-		}
+		SelectBuyItem();
 	}
 }
 
@@ -287,24 +273,14 @@ void Scene_Shop::UpdateSellSelection() {
 			Scene::Pop();
 		}
 	} else if (Input::IsTriggered(Input::DECISION)) {
-		const lcf::rpg::Item* item = sell_window->GetItem();
-		int item_id = (item != nullptr) ? item->ID : 0;
-		status_window->SetItemId(item_id);
-		party_window->SetItemId(item_id);
-
-		if (item && item->price > 0) {
-			Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
-			number_window->SetData(item->ID, Main_Data::game_party->GetItemCount(item->ID), item->price / 2);
-			SetMode(SellHowMany);
-		} else {
-			Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
-		}
+		SelectSellItem();
 	}
 }
 
 void Scene_Shop::UpdateNumberInput() {
 	if (Input::IsTriggered(Input::CANCEL)) {
 		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+		ai_transaction = false;
 		switch (shop_window->GetChoice()) {
 		case Buy:
 			SetMode(Buy); break;
@@ -312,28 +288,12 @@ void Scene_Shop::UpdateNumberInput() {
 			SetMode(Sell); break;
 		}
 	} else if (Input::IsTriggered(Input::DECISION)) {
-		int item_id;
-		switch (shop_window->GetChoice()) {
-		case Buy:
-			item_id = buy_window->GetItemId();
-			Main_Data::game_party->LoseGold(number_window->GetTotal());
-			Main_Data::game_party->AddItem(item_id, number_window->GetNumber());
-			gold_window->Refresh();
-			buy_window->Refresh();
-			status_window->Refresh();
-			SetMode(Bought); break;
-		case Sell:
-			item_id = sell_window->GetItem() == NULL ? 0 : sell_window->GetItem()->ID;
-			Main_Data::game_party->GainGold(number_window->GetTotal());
-			Main_Data::game_party->RemoveItem(item_id, number_window->GetNumber());
-			gold_window->Refresh();
-			sell_window->Refresh();
-			status_window->Refresh();
-			SetMode(Sold); break;
+		if (ai_transaction) {
+			ai_confirm = true;
+			number_window->SetActive(false);
+		} else {
+			ExecuteTransaction();
 		}
-		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
-
-		did_transaction = true;
 	}
 }
 
@@ -341,4 +301,156 @@ void Scene_Shop::Suspend(SceneType /* next_scene */) {
 	if (on_finish) {
 		on_finish(did_transaction);
 	}
+}
+
+void Scene_Shop::SelectBuyItem() {
+	int item_id = buy_window->GetItemId();
+
+	// checks the money and number of items possessed before buy
+	if (buy_window->CheckEnable(item_id)) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+
+		// Items are guaranteed to be valid
+		const lcf::rpg::Item* item = lcf::ReaderUtil::GetElement(lcf::Data::items, item_id);
+
+		int max = Main_Data::game_party->GetMaxItemCount(item_id) - Main_Data::game_party->GetItemCount(item_id);
+		if (item->price > 0) {
+			max = std::min<int>(max, Main_Data::game_party->GetGold() / item->price);
+		}
+		number_window->SetData(item_id, max, item->price);
+
+		SetMode(BuyHowMany);
+	}
+	else {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+	}
+}
+
+void Scene_Shop::SelectSellItem() {
+	const lcf::rpg::Item* item = sell_window->GetItem();
+	int item_id = (item != nullptr) ? item->ID : 0;
+	status_window->SetItemId(item_id);
+	party_window->SetItemId(item_id);
+
+	if (item && item->price > 0) {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+		number_window->SetData(item->ID, Main_Data::game_party->GetItemCount(item->ID), item->price / 2);
+		SetMode(SellHowMany);
+	} else {
+		Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Buzzer));
+	}
+}
+
+void Scene_Shop::ExecuteTransaction() {
+	int item_id;
+	switch (shop_window->GetChoice()) {
+	case Buy:
+		item_id = buy_window->GetItemId();
+		Main_Data::game_party->LoseGold(number_window->GetTotal());
+		Main_Data::game_party->AddItem(item_id, number_window->GetNumber());
+		gold_window->Refresh();
+		buy_window->Refresh();
+		status_window->Refresh();
+		SetMode(Bought); break;
+	case Sell:
+		item_id = sell_window->GetItem() == NULL ? 0 : sell_window->GetItem()->ID;
+		Main_Data::game_party->GainGold(number_window->GetTotal());
+		Main_Data::game_party->RemoveItem(item_id, number_window->GetNumber());
+		gold_window->Refresh();
+		sell_window->Refresh();
+		status_window->Refresh();
+		SetMode(Sold); break;
+	}
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Decision));
+
+	did_transaction = true;
+}
+
+const char* Scene_Shop::AiChoose(int index) {
+	if (ai_confirm) return "confirm or back required";
+	switch (mode) {
+	case BuySellLeave:
+	case BuySellLeave2:
+		if (index < 0 || index > 2) return "shop menu index out of range";
+		if ((index == 0 && !allow_buy) || (index == 1 && !allow_sell)) return "shop action unavailable";
+		shop_window->SetChoice(index == 0 ? Buy : index == 1 ? Sell : Leave);
+		if (index == 2) Scene::Pop();
+		else SetMode(shop_window->GetChoice());
+		return nullptr;
+	case Buy: {
+		if (index < 0 || index >= static_cast<int>(goods.size())) return "goods index out of range";
+		int id = goods[index];
+		if (!buy_window->CheckEnable(id)) {
+			const auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, id);
+			return item && item->price > Main_Data::game_party->GetGold() ? "insufficient gold" : "inventory full";
+		}
+		buy_window->SetIndex(index);
+		status_window->SetItemId(id);
+		party_window->SetItemId(id);
+		SelectBuyItem();
+		ai_transaction = true;
+		return nullptr;
+	}
+	case Sell: {
+		const auto& data = sell_window->AiData();
+		if (index < 0 || index >= static_cast<int>(data.size())) return "inventory index out of range";
+		if (!sell_window->CheckEnable(data[index])) return "item cannot be sold";
+		if (Main_Data::game_party->GetItemCount(data[index]) <= 0) return "item is no longer owned";
+		sell_window->SetIndex(index);
+		SelectSellItem();
+		ai_transaction = true;
+		return nullptr;
+	}
+	case BuyHowMany:
+	case SellHowMany:
+		// In quantity phase the index is the literal count, starting at 1.
+		if (!number_window->AiSetNumber(index)) return "quantity out of range";
+		ai_transaction = true;
+		ai_confirm = true;
+		number_window->SetActive(false);
+		return nullptr;
+	default:
+		return "shop is not awaiting a selection";
+	}
+}
+
+const char* Scene_Shop::AiConfirm() {
+	if (!ai_confirm || (mode != BuyHowMany && mode != SellHowMany)) return "no staged transaction";
+	const int id = number_window->AiItemId();
+	const int count = number_window->GetNumber();
+	const auto& party = *Main_Data::game_party;
+	if (mode == BuyHowMany) {
+		if (number_window->GetTotal() > party.GetGold()) return "insufficient gold";
+		if (count > party.GetMaxItemCount(id) - party.GetItemCount(id)) return "inventory full";
+	} else if (count > party.GetItemCount(id)) {
+		return "item is no longer owned";
+	}
+	ai_confirm = false;
+	ai_transaction = false;
+	ExecuteTransaction();
+	return nullptr;
+}
+
+const char* Scene_Shop::AiBack() {
+	switch (mode) {
+	case BuySellLeave:
+	case BuySellLeave2:
+		Scene::Pop(); break;
+	case Buy:
+		if (allow_sell) SetMode(BuySellLeave2); else Scene::Pop();
+		break;
+	case Sell:
+		if (allow_buy) SetMode(BuySellLeave2); else Scene::Pop();
+		break;
+	case BuyHowMany:
+		SetMode(Buy); break;
+	case SellHowMany:
+		SetMode(Sell); break;
+	default:
+		return "shop is not awaiting input";
+	}
+	ai_transaction = false;
+	ai_confirm = false;
+	Main_Data::game_system->SePlay(Main_Data::game_system->GetSystemSE(Main_Data::game_system->SFX_Cancel));
+	return nullptr;
 }

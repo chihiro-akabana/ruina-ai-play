@@ -37,6 +37,7 @@
 #include "scene_battle_rpg2k.h"
 #include "scene_end.h"
 #include "scene_equip.h"
+#include "scene_shop.h"
 #include "scene_file.h"
 #include "scene_item.h"
 #include "scene_load.h"
@@ -82,6 +83,7 @@ struct Command {
 };
 
 long g_last_seq = 0;
+long g_shop_confirm_id = 0;
 // Command domains: 0 = message window, 1 = name screen, 2 = exploration,
 // 3 = battle selections, 4 = menus, 5 = screen capture.
 constexpr int kCaptureDomain = 5;
@@ -1670,6 +1672,69 @@ void UpdateStatus(Scene_Status* scene) {
 	a["equipment"] = EquipmentJson(actor);
 	state["actor"] = std::move(a);
 	Emit(std::move(state));
+}
+
+void UpdateShop(Scene_Shop* scene) {
+	EnsureInit();
+	if (!g_enabled || !scene) return;
+	SetHookKind(18);
+	Command cmd;
+	if (ReadFreshCommand(cmd, 4)) {
+		const char* error = nullptr;
+		if (cmd.state_id != g_last_id) error = "stale state_id";
+		else if (g_last_type != "shop") error = "state is not this shop screen";
+		else if (cmd.type == "choose") error = scene->AiChoose(cmd.index);
+		else if (cmd.type == "back") error = scene->AiBack();
+		else if (cmd.type == "confirm") error = g_shop_confirm_id == g_last_id
+			? scene->AiConfirm() : "confirm summary has not been emitted";
+		else error = "command is not applicable to this screen";
+		Consume(cmd, error ? "rejected" : "applied", error);
+	}
+	nlohmann::json state = BuildContext();
+	state["type"] = "shop";
+	const int mode = scene->AiMode();
+	switch (mode) {
+	case Scene_Shop::BuySellLeave:
+	case Scene_Shop::BuySellLeave2:
+		state["phase"] = "menu";
+		state["index"] = scene->AiMenuWindow()->AiIndex();
+		state["choices"] = nlohmann::json::array();
+		for (int i = 0; i < 3; ++i) state["choices"].push_back({{"index", i}, {"text", std::string(scene->AiMenuWindow()->AiChoiceText(i))}});
+		break;
+	case Scene_Shop::Buy:
+	case Scene_Shop::Sell: {
+		const bool buy = mode == Scene_Shop::Buy;
+		state["phase"] = buy ? "buy" : "sell";
+		state["index"] = buy ? scene->AiBuyWindow()->GetIndex() : scene->AiSellWindow()->GetIndex();
+		state["items"] = nlohmann::json::array();
+		const auto& data = buy ? scene->AiGoods() : scene->AiSellWindow()->AiData();
+		for (size_t i = 0; i < data.size(); ++i) {
+			const auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, data[i]);
+			if (!item) continue;
+			nlohmann::json entry = {{"index", i}, {"name", item->name}, {"price", buy ? item->price : item->price / 2},
+				{"count", Main_Data::game_party->GetItemCount(data[i])},
+				{"enabled", buy ? scene->AiBuyWindow()->CheckEnable(data[i]) : scene->AiSellWindow()->CheckEnable(data[i])}};
+			if (buy) entry["equipped"] = Main_Data::game_party->GetEquippedItemCount(data[i]);
+			state["items"].push_back(std::move(entry));
+		}
+		break;
+	}
+	case Scene_Shop::BuyHowMany:
+	case Scene_Shop::SellHowMany: {
+		const bool buy = mode == Scene_Shop::BuyHowMany;
+		auto* number = scene->AiNumberWindow();
+		const auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, number->AiItemId());
+		state["phase"] = scene->AiIsConfirm() ? "confirm" : "quantity";
+		state["transaction"] = {{"action", buy ? "buy" : "sell"}, {"item", item ? std::string(item->name) : ""},
+			{"count", number->GetNumber()}, {"unit_price", number->AiUnitPrice()}, {"total", number->GetTotal()},
+			{"gold_after", Utils::Clamp(Main_Data::game_party->GetGold() + (buy ? -number->GetTotal() : number->GetTotal()), 0, 999999)}};
+		break;
+	}
+	case Scene_Shop::Bought: state["phase"] = "bought"; break;
+	case Scene_Shop::Sold: state["phase"] = "sold"; break;
+	default: state["phase"] = "leave"; break;
+	}
+	if (Emit(std::move(state))) g_shop_confirm_id = scene->AiIsConfirm() ? g_last_id : 0;
 }
 
 } // namespace AiState

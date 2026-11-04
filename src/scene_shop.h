@@ -71,7 +71,24 @@ public:
 	void UpdateSellSelection();
 	void UpdateNumberInput();
 
+	/** Bridge staging never executes a transaction; only AiConfirm does. */
+	const char* AiChoose(int index);
+	const char* AiConfirm();
+	const char* AiBack();
+	int AiMode() const { return mode; }
+	bool AiIsConfirm() const { return ai_confirm; }
+	const std::vector<int>& AiGoods() const { return goods; }
+	Window_ShopBuy* AiBuyWindow() { return buy_window.get(); }
+	Window_ShopSell* AiSellWindow() { return sell_window.get(); }
+	Window_ShopNumber* AiNumberWindow() { return number_window.get(); }
+	Window_Shop* AiMenuWindow() { return shop_window.get(); }
+
 private:
+	void SelectBuyItem();
+	void SelectSellItem();
+	void ExecuteTransaction();
+	bool ai_transaction = false;
+	bool ai_confirm = false;
 	/** Displays available items. */
 	std::unique_ptr<Window_Help> help_window;
 	std::unique_ptr<Window_ShopBuy> buy_window;

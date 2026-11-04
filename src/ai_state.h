@@ -56,6 +56,7 @@ class Scene_File;
 class Scene_End;
 class Scene_Equip;
 class Scene_Status;
+class Scene_Shop;
 class Scene_Name;
 enum class BattleResult;
 
@@ -134,6 +135,9 @@ void UpdateFile(Scene_File* scene);
 void UpdateEnd(Scene_End* scene);
 void UpdateEquip(Scene_Equip* scene);
 void UpdateStatus(Scene_Status* scene);
+
+/** Shop menu/item choose, literal quantity choose, explicit confirm/back. */
+void UpdateShop(Scene_Shop* scene);
 
 } // namespace AiState
 

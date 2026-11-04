@@ -2,6 +2,10 @@
 #include BRIDGE_SOURCE
 #include "tests/test_mock_actor.h"
 #include "drawable_mgr.h"
+#include "filefinder.h"
+#include "filesystem.h"
+#include <lcf/ldb/reader.h>
+#include <lcf/lmu/reader.h>
 #include <iostream>
 
 using namespace AiState;
@@ -93,6 +97,131 @@ static void Equip() {
     Scene::Pop(); scene.reset(); Scene::old_instances.clear();
     std::cout << "PASS equip: " << checks << " checks\n";
 }
+
+static void Shop(const std::string& game) {
+    const int start_checks = checks;
+    MockActor db(Player::EngineRpg2k);
+    std::vector<int> goods{1,2,3};
+    int shop_type = 0;
+    if (game.empty()) {
+        lcf::Data::items[0].name = "Potion"; lcf::Data::items[0].price = 31;
+        lcf::Data::items[1].name = "Unsellable"; lcf::Data::items[1].price = 0;
+        lcf::Data::items[2].name = "Expensive"; lcf::Data::items[2].price = 999999;
+    } else {
+        FileFinder::SetGameFilesystem(FileFinder::Root().Create(game));
+        auto data = lcf::LDB_Reader::Load(game + "/RPG_RT.ldb", "windows-1252");
+        Check(data != nullptr, "real Ruina database loads");
+        lcf::Data::data = std::move(*data);
+        goods.clear();
+        std::vector<std::filesystem::path> maps;
+        for (const auto& path : std::filesystem::directory_iterator(game))
+            if (path.path().extension() == ".lmu") maps.push_back(path.path());
+        std::sort(maps.begin(), maps.end());
+        for (const auto& path : maps) {
+            auto map = lcf::LMU_Reader::Load(path.string(), "windows-1252");
+            if (!map) continue;
+            for (const auto& event : map->events) for (const auto& page : event.pages) for (const auto& command : page.event_commands) {
+                if (command.code != 10720 || command.parameters.size() <= 4 || command.parameters[0] != 0) continue;
+                bool useful = false;
+                for (size_t i = 4; i < command.parameters.size(); ++i) {
+                    auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, command.parameters[i]);
+                    if (item && item->price > 0 && item->price < 100000) useful = true;
+                }
+                if (!useful) continue;
+                goods.assign(command.parameters.begin() + 4, command.parameters.end());
+                shop_type = command.parameters[1];
+                std::cout << "Real shop: " << path.filename().string() << ", event " << event.ID << ", goods " << goods.size() << '\n';
+                goto found;
+            }
+        }
+        found:
+        Check(!goods.empty(), "real buy/sell shop definition found");
+    }
+    auto& party = *Main_Data::game_party;
+    party.Clear();
+    party.GainGold(900000);
+    auto scene = std::make_shared<Scene_Shop>(goods, shop_type, true, true, nullptr);
+    Scene::Push(scene); scene->Start(); UpdateShop(scene.get());
+    Check(Latest()["phase"] == "menu" && Latest()["gold"] == party.GetGold(), "shop menu and gold emitted");
+    Send("confirm"); UpdateShop(scene.get());
+    Check(Ack()["status"] == "rejected", "confirm at menu cannot transact");
+    Send("choose", 0); UpdateShop(scene.get());
+    auto buy = Latest();
+    Check(buy["phase"] == "buy" && buy["items"].size() == goods.size(), "native buy goods list emitted");
+    int selected = -1;
+    for (size_t i = 0; i < goods.size(); ++i) {
+        auto* item = lcf::ReaderUtil::GetElement(lcf::Data::items, goods[i]);
+        Check(buy["items"][i]["name"] == std::string(item->name) && buy["items"][i]["price"] == item->price
+            && buy["items"][i]["count"] == party.GetItemCount(goods[i]) && buy["items"][i]["equipped"] == party.GetEquippedItemCount(goods[i]),
+            "buy name/price/owned/equipped match native database/window values");
+        if (selected < 0 && item->price > 0 && item->price < 100000 && party.GetMaxItemCount(goods[i]) >= 2) selected = static_cast<int>(i);
+    }
+    Check(selected >= 0, "test shop has purchasable item");
+    const int id = goods[selected];
+    const int price = lcf::ReaderUtil::GetElement(lcf::Data::items, id)->price;
+    const int gold = party.GetGold(), owned = party.GetItemCount(id);
+    Send("choose", selected); UpdateShop(scene.get());
+    Check(Latest()["phase"] == "quantity" && party.GetGold() == gold && party.GetItemCount(id) == owned, "item selection stages quantity without money movement");
+    Send("confirm"); UpdateShop(scene.get());
+    Check(Ack()["status"] == "rejected" && party.GetGold() == gold, "confirm cannot skip quantity and summary");
+    Send("choose", 0); UpdateShop(scene.get());
+    Check(Ack()["reason"] == "quantity out of range", "quantity zero rejected");
+    Input::triggered[Input::DECISION] = true; scene->UpdateNumberInput(); Input::triggered.reset();
+    Send("confirm"); UpdateShop(scene.get());
+    Check(Ack()["reason"] == "confirm summary has not been emitted" && party.GetGold() == gold,
+        "native decision staging cannot confirm before summary emission");
+    Send("back"); UpdateShop(scene.get());
+    Send("choose", selected); UpdateShop(scene.get());
+    Send("choose", 2); UpdateShop(scene.get());
+    auto summary = Latest()["transaction"];
+    Check(Latest()["phase"] == "confirm" && summary["count"] == 2 && summary["unit_price"] == price
+        && summary["total"] == 2*price && summary["gold_after"] == gold - 2*price, "purchase confirm summary matches exact pending trade");
+    Check(party.GetGold() == gold && party.GetItemCount(id) == owned, "confirm summary has no inventory or gold effects");
+    Send("choose", 1); UpdateShop(scene.get());
+    Check(Ack()["reason"] == "confirm or back required" && party.GetGold() == gold, "choose at confirm cannot buy");
+    // Native decision also cannot bypass an explicitly staged summary.
+    Input::triggered[Input::DECISION] = true; scene->vUpdate(); Input::triggered.reset();
+    Check(party.GetGold() == gold && party.GetItemCount(id) == owned, "native decision cannot execute bridge-staged trade");
+    Send("confirm", -1, g_last_id + 1); UpdateShop(scene.get());
+    Check(Ack()["reason"] == "stale state_id" && party.GetGold() == gold, "stale shop confirmation rejected");
+    Send("confirm"); UpdateShop(scene.get());
+    Check(Ack()["status"] == "applied" && party.GetGold() == summary["gold_after"] && party.GetItemCount(id) == owned+2
+        && Latest()["phase"] == "bought", "purchase executes exactly the displayed trade through native routine");
+    auto log = Read("commands.jsonl"); UpdateShop(scene.get());
+    Check(log == Read("commands.jsonl") && party.GetItemCount(id) == owned+2, "duplicate confirm cannot transact twice");
+    for (int i=0; i<DEFAULT_FPS; ++i) scene->vUpdate();
+    UpdateShop(scene.get()); Check(Latest()["phase"] == "buy", "native bought acknowledgement timer returns to buy");
+    Send("choose", selected); UpdateShop(scene.get()); Send("choose", 1); UpdateShop(scene.get());
+    int after_purchase = party.GetGold();
+    Send("back"); UpdateShop(scene.get());
+    Check(Latest()["phase"] == "buy" && party.GetGold() == after_purchase && party.GetItemCount(id) == owned+2, "back from purchase confirmation cancels without effects");
+    Send("back"); UpdateShop(scene.get()); Send("choose", 1); UpdateShop(scene.get());
+    Check(Latest()["phase"] == "sell", "menu choose sell opens inventory");
+    int sell_index = -1;
+    auto sell = Latest();
+    for (const auto& entry : sell["items"]) if (entry["name"] == std::string(lcf::ReaderUtil::GetElement(lcf::Data::items,id)->name)) sell_index = entry["index"];
+    Check(sell_index >= 0 && sell["items"][sell_index]["price"] == price/2 && sell["items"][sell_index]["count"] == owned+2, "sell inventory displays native count and halved sell price");
+    Send("choose", sell_index); UpdateShop(scene.get()); Send("choose", 1); UpdateShop(scene.get());
+    summary = Latest()["transaction"];
+    Check(Latest()["phase"] == "confirm" && summary["total"] == price/2 && summary["gold_after"] == after_purchase + price/2
+        && party.GetGold() == after_purchase && party.GetItemCount(id) == owned+2, "sale summary precedes all effects");
+    Send("back"); UpdateShop(scene.get());
+    Check(party.GetGold() == after_purchase && party.GetItemCount(id) == owned+2, "back cancels sale without effects");
+    Send("choose", sell_index); UpdateShop(scene.get()); Send("choose", 1); UpdateShop(scene.get()); Send("confirm"); UpdateShop(scene.get());
+    Check(party.GetGold() == after_purchase + price/2 && party.GetItemCount(id) == owned+1 && Latest()["phase"] == "sold", "sale uses native transaction and changes gold/inventory by summary");
+    for (int i=0; i<DEFAULT_FPS; ++i) scene->vUpdate();
+    UpdateShop(scene.get());
+    Send("advance"); UpdateShop(scene.get()); Check(Ack()["status"] == "rejected", "misplaced shop verb rejected");
+    Send("future_verb"); UpdateShop(scene.get()); Check(Ack()["reason"] == "unknown command type", "unknown shop verb rejected");
+    Send("choose", 999); UpdateShop(scene.get()); Check(Ack()["status"] == "rejected", "invalid inventory index rejected");
+    Send("back"); UpdateShop(scene.get()); Send("choose", 0); UpdateShop(scene.get());
+    party.LoseGold(party.GetGold());
+    Send("choose", selected); UpdateShop(scene.get()); Check(Ack()["reason"] == "insufficient gold", "native insufficient-gold refusal surfaced");
+    party.GainGold(900000); party.AddItem(id, party.GetMaxItemCount(id));
+    Send("choose", selected); UpdateShop(scene.get()); Check(Ack()["reason"] == "inventory full", "native full-inventory refusal surfaced");
+    Scene::Pop(); scene.reset(); Scene::old_instances.clear();
+    std::cout << "PASS " << (game.empty() ? "shop fixture" : "Ruina shop") << ": " << checks - start_checks << " checks\n";
+}
 int main(int argc, char** argv) {
     char directory[] = "/tmp/menu-shop-key-XXXXXX";
     Check(mkdtemp(directory) != nullptr, "temporary output");
@@ -103,4 +232,5 @@ int main(int argc, char** argv) {
     DrawableList drawables;
     DrawableMgr::SetLocalList(&drawables);
     Equip();
+    Shop(argc > 1 ? argv[1] : "");
 }

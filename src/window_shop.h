@@ -45,6 +45,8 @@ public:
 	void SetMode(int nmode);
 	int GetChoice() const;
 	void SetChoice(int nchoice);
+	int AiIndex() const { return index - 1; }
+	std::string_view AiChoiceText(int i) const { return i == 0 ? buy_msg : i == 1 ? sell_msg : leave_msg; }
 
 	enum WindowMessageValues {
 		LeftMargin = 8,

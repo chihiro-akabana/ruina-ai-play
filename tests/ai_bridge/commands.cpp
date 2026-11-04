@@ -1,4 +1,12 @@
 #include BRIDGE_SOURCE
+// Old bridge sources do not define hooks added after their revision. These
+// adapters only satisfy linkage; legacy command traces never enter a shop.
+#ifdef BASELINE_NO_SHOP
+namespace AiState { void UpdateShop(Scene_Shop*) {} }
+#endif
+#ifdef BASELINE_NO_KEY
+namespace AiState { int PollKeyCommand() { return -1; } }
+#endif
 #include "baseui.h"
 #include "bitmap.h"
 #include "tests/test_mock_actor.h"

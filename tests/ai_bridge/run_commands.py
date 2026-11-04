@@ -38,9 +38,13 @@ with tempfile.TemporaryDirectory(prefix='ai-bridge-harness-') as directory:
         command = [a for a in compile_args if a != '-DNDEBUG']
         command[command.index('-o') + 1] = obj
         command[command.index('-c') + 1] = str(repo / 'tests/ai_bridge' / harness)
-        command += ['-I' + str(repo), '-DBRIDGE_SOURCE="' + str(source) + '"']
+        command += ['-O0', '-I' + str(repo), '-DBRIDGE_SOURCE="' + str(source) + '"']
         if baseline:
             command += ['-DBASELINE']
+            if 'void UpdateShop(' not in source.read_text():
+                command += ['-DBASELINE_NO_SHOP']
+            if 'int PollKeyCommand(' not in source.read_text():
+                command += ['-DBASELINE_NO_KEY']
         subprocess.run(command, cwd=entry['directory'], check=True)
         command = link_args.copy()
         command[command.index('-o') + 1] = str(work / name)

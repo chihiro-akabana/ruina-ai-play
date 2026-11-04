@@ -92,3 +92,10 @@ void Window_ShopNumber::Update() {
 int Window_ShopNumber::GetTotal() const {
 	return price * number;
 }
+
+bool Window_ShopNumber::AiSetNumber(int value) {
+	if (value < 1 || value > item_max) return false;
+	number = value;
+	Refresh();
+	return true;
+}

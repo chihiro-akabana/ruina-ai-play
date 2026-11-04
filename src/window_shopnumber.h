@@ -72,6 +72,11 @@ public:
 	 */
 	int GetTotal() const;
 
+	/** Same quantity bounds as the arrow controls; never performs a trade. */
+	bool AiSetNumber(int value);
+	int AiItemId() const { return item_id; }
+	int AiUnitPrice() const { return price; }
+
 protected:
 	int item_max;
 	int price;
