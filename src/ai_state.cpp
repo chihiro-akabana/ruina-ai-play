@@ -19,6 +19,8 @@
 
 #include <lcf/reader_util.h>
 
+#include "baseui.h"
+#include "bitmap.h"
 #include "game_actor.h"
 #include "game_battle.h"
 #include "game_battler.h"
@@ -43,6 +45,7 @@
 #include "scene_save.h"
 #include "scene_skill.h"
 #include "scene_status.h"
+#include "utils.h"
 #include "window_actortarget.h"
 #include "window_command.h"
 #include "window_item.h"
@@ -55,6 +58,7 @@ namespace {
 
 bool g_initialized = false;
 bool g_enabled = false;
+bool g_capture_enabled = false;
 std::string g_dir;
 std::string g_last_content;
 long g_counter = 0;
@@ -79,8 +83,9 @@ struct Command {
 
 long g_last_seq = 0;
 // Command domains: 0 = message window, 1 = name screen, 2 = exploration,
-// 3 = battle selections.
-std::string g_cmd_raw_seen[5];
+// 3 = battle selections, 4 = menus, 5 = screen capture.
+constexpr int kCaptureDomain = 5;
+std::string g_cmd_raw_seen[6];
 bool g_has_pending = false;
 Command g_pending;
 
@@ -215,6 +220,8 @@ void EnsureInit() {
 	}
 	g_initialized = true;
 	const char* dir = std::getenv("EASYRPG_AI_STATE_DIR");
+	const char* capture = std::getenv("EASYRPG_AI_CAPTURE");
+	g_capture_enabled = capture != nullptr && std::string(capture) == "1";
 	if (dir == nullptr || dir[0] == '\0') {
 		g_enabled = false;
 		return;
@@ -248,6 +255,9 @@ void WriteAck(const Command& cmd, const char* status, const char* reason) {
 	ack["status"] = status;
 	if (reason != nullptr && reason[0] != '\0') {
 		ack["reason"] = reason;
+		if (cmd.type == "capture") {
+			ack["detail"] = reason;
+		}
 	}
 	std::string line = ack.dump();
 	AppendLine(g_dir + "/commands.jsonl", line);
@@ -307,9 +317,9 @@ bool Emit(nlohmann::json state) {
 /**
  * Reads command.json when its content changed. Returns true when a
  * fresh, not-yet-handled command is available. Commands from the other
- * input domain (message window vs. name screen) are left untouched:
- * each poll only consumes commands of its own domain, except that any
- * poll may reject a command addressed to a stale state.
+ * input domains retain their existing routing, including stale-state
+ * rejection. Capture is isolated before those checks: only its post-draw
+ * poll may read it, and that poll never returns other command types.
  */
 bool ReadFreshCommand(Command& out, int domain) {
 	std::ifstream in(g_dir + "/command.json");
@@ -331,18 +341,33 @@ bool ReadFreshCommand(Command& out, int domain) {
 	if (parsed.is_discarded() || !parsed.is_object()) {
 		return false;
 	}
-	Command cmd;
-	cmd.seq = parsed.value("seq", 0L);
-	cmd.state_id = parsed.value("state_id", 0L);
-	cmd.type = parsed.value("type", "");
-	cmd.index = parsed.value("index", -1);
-	if (parsed.contains("name") && parsed["name"].is_string()) {
-		cmd.has_name = true;
-		cmd.name = parsed["name"].get<std::string>();
+	const bool is_capture = parsed.contains("type") && parsed["type"].is_string()
+		&& parsed["type"] == "capture";
+	if (is_capture != (domain == kCaptureDomain)) {
+		return false;
 	}
-	cmd.dir = parsed.value("dir", "");
-	cmd.steps = parsed.value("steps", 0);
-	cmd.point = parsed.value("point", -1);
+	Command cmd;
+	if (is_capture) {
+		if (!parsed.contains("seq") || !parsed["seq"].is_number_integer()) {
+			return false;
+		}
+		cmd.seq = parsed["seq"].get<long>();
+		cmd.type = "capture";
+		// Deliberately ignore the requested state_id: title screens and
+		// picture waits may have no emitted state, or only a stale one.
+	} else {
+		cmd.seq = parsed.value("seq", 0L);
+		cmd.state_id = parsed.value("state_id", 0L);
+		cmd.type = parsed.value("type", "");
+		cmd.index = parsed.value("index", -1);
+		if (parsed.contains("name") && parsed["name"].is_string()) {
+			cmd.has_name = true;
+			cmd.name = parsed["name"].get<std::string>();
+		}
+		cmd.dir = parsed.value("dir", "");
+		cmd.steps = parsed.value("steps", 0);
+		cmd.point = parsed.value("point", -1);
+	}
 	if (cmd.seq <= 0 || cmd.seq <= g_last_seq || cmd.type.empty()) {
 		return false; // duplicate write or malformed: not a fresh command
 	}
@@ -355,7 +380,81 @@ void Consume(const Command& cmd, const char* status, const char* reason) {
 	WriteAck(cmd, status, reason);
 }
 
+// Both files are staged completely before publication. A failed write or
+// rename leaves no partial capture.png; an earlier complete capture may remain.
+const char* SaveCapture(const Command& cmd) {
+	if (!DisplayUi || !DisplayUi->GetDisplaySurface()) {
+		return "no display surface";
+	}
+	const auto& surface = DisplayUi->GetDisplaySurface();
+	if (surface->GetWidth() <= 0 || surface->GetHeight() <= 0) {
+		return "no display surface";
+	}
+	nlohmann::json metadata;
+	metadata["seq"] = cmd.seq;
+	metadata["state_id"] = cmd.state_id;
+	metadata["scene"] = Scene::instance
+		? Utils::LowerCase(Scene::scene_names[Scene::instance->type]) : "null";
+	metadata["width"] = surface->GetWidth();
+	metadata["height"] = surface->GetHeight();
+
+	const std::string png_path = g_dir + "/capture.png";
+	const std::string json_path = g_dir + "/capture.json";
+	const std::string png_tmp = png_path + ".tmp";
+	const std::string json_tmp = json_path + ".tmp";
+	const char* error = [&]() -> const char* {
+		std::ofstream png(png_tmp, std::ios::binary | std::ios::trunc);
+		if (!png) {
+			return "cannot open capture PNG";
+		}
+		// Write the display surface directly: the screenshot ostream
+		// overload honours screenshot_scale, but captures must be native.
+		if (!surface->WritePNG(png)) {
+			return "cannot encode capture PNG";
+		}
+		png.close();
+		if (!png) {
+			return "cannot write capture PNG";
+		}
+
+		std::ofstream json(json_tmp, std::ios::trunc);
+		json << metadata.dump() << '\n';
+		json.close();
+		if (!json) {
+			return "cannot write capture metadata";
+		}
+
+		std::error_code ec;
+		std::filesystem::rename(png_tmp, png_path, ec);
+		if (ec) {
+			return "cannot publish capture PNG";
+		}
+		std::filesystem::rename(json_tmp, json_path, ec);
+		return ec ? "cannot publish capture metadata" : nullptr;
+	}();
+	std::error_code ec;
+	std::filesystem::remove(png_tmp, ec);
+	std::filesystem::remove(json_tmp, ec);
+	return error;
+}
+
 } // namespace
+
+void PollCaptureCommand() {
+	EnsureInit();
+	if (!g_enabled) {
+		return;
+	}
+	Command cmd;
+	if (!ReadFreshCommand(cmd, kCaptureDomain)) {
+		return;
+	}
+	// Capture observes the just-drawn frame without emitting a state or
+	// changing pending inputs. Its ack reports the current id, even at title.
+	cmd.state_id = g_last_id;
+	const char* error = g_capture_enabled ? SaveCapture(cmd) : "capture disabled";
+	Consume(cmd, error ? "rejected" : "applied", error);
+}
 
 void OnMessageStart(const PendingMessage& pm, const std::string& assembled_text) {
 	EnsureInit();

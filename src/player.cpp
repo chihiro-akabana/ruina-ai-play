@@ -32,6 +32,7 @@
 #endif
 
 #include "async_handler.h"
+#include "ai_state.h"
 #include "audio.h"
 #include "cache.h"
 #include "rand.h"
@@ -266,6 +267,9 @@ void Player::MainLoop() {
 	}
 
 	Player::Draw();
+
+	// AI bridge: on-demand observation of the just-drawn frame in every scene.
+	AiState::PollCaptureCommand();
 
 	Scene::old_instances.clear();
 

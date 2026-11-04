@@ -21,7 +21,11 @@
  *
  * Commands carry the state id they answer and a sequence number; a
  * command whose state id is not the latest emitted state is rejected
- * as stale and never applied.
+ * as stale and never applied. Exception: capture ignores the requested
+ * state_id and acknowledges the current id (0 before any state emission).
+ * It saves the just-drawn native frame as capture.png with capture.json
+ * metadata, only when EASYRPG_AI_CAPTURE=1 was set at bridge init.
+ * Otherwise it is consumed and rejected with detail "capture disabled".
  *
  * Only information that is on screen (or inspectable through normal
  * menus) is emitted: displayed text, displayed choices, party status,
@@ -49,6 +53,9 @@ class Scene_Name;
 enum class BattleResult;
 
 namespace AiState {
+
+/** Scene-independent read-only capture poll; call immediately after drawing. */
+void PollCaptureCommand();
 
 /** Called when a message has been fully assembled for display. */
 void OnMessageStart(const PendingMessage& pm, const std::string& assembled_text);
