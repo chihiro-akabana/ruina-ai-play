@@ -20,6 +20,7 @@
 #include <lcf/reader_util.h>
 
 #include "baseui.h"
+#include "input.h"
 #include "bitmap.h"
 #include "game_actor.h"
 #include "game_battle.h"
@@ -60,6 +61,7 @@ namespace {
 bool g_initialized = false;
 bool g_enabled = false;
 bool g_capture_enabled = false;
+bool g_key_enabled = false;
 std::string g_dir;
 std::string g_last_content;
 long g_counter = 0;
@@ -73,6 +75,7 @@ struct Command {
 	long seq = 0;
 	long state_id = 0;
 	std::string type;
+	std::string button;
 	int index = -1;
 	bool has_name = false;
 	std::string name;
@@ -85,9 +88,10 @@ struct Command {
 long g_last_seq = 0;
 long g_shop_confirm_id = 0;
 // Command domains: 0 = message window, 1 = name screen, 2 = exploration,
-// 3 = battle selections, 4 = menus, 5 = screen capture.
+// 3 = battle selections, 4 = menus/shop, 5 = screen capture, 6 = key pulse.
 constexpr int kCaptureDomain = 5;
-std::string g_cmd_raw_seen[6];
+constexpr int kKeyDomain = 6;
+std::string g_cmd_raw_seen[7];
 bool g_has_pending = false;
 Command g_pending;
 
@@ -195,6 +199,7 @@ std::string JoinLines(const std::vector<std::string>& lines) {
 
 nlohmann::json BuildContext() {
 	nlohmann::json ctx;
+	ctx["last_seq"] = g_last_seq;
 	ctx["scene"] = Game_Battle::IsBattleRunning() ? "battle" : "map";
 	ctx["location"] = std::string(Game_Map::GetMapName(Game_Map::GetMapId()));
 
@@ -228,6 +233,8 @@ void EnsureInit() {
 	g_initialized = true;
 	const char* dir = std::getenv("EASYRPG_AI_STATE_DIR");
 	const char* capture = std::getenv("EASYRPG_AI_CAPTURE");
+	const char* key = std::getenv("EASYRPG_AI_KEY");
+	g_key_enabled = key != nullptr && std::string(key) == "1";
 	g_capture_enabled = capture != nullptr && std::string(capture) == "1";
 	if (dir == nullptr || dir[0] == '\0') {
 		g_enabled = false;
@@ -293,7 +300,12 @@ bool Emit(nlohmann::json state) {
 		bundle["summary_lines"] = g_battle_pending_summary_lines;
 		state["last_battle"] = std::move(bundle);
 	}
-	std::string content = state.dump();
+	// All producers, including states without BuildContext, carry the same
+	// consumption heartbeat. It does not itself defeat visible-state dedup.
+	state["last_seq"] = g_last_seq;
+	auto visible = state;
+	visible.erase("last_seq");
+	std::string content = visible.dump();
 	if (content == g_last_content) {
 		return false; // unchanged state: suppress (token-cost rule from the plan)
 	}
@@ -324,7 +336,7 @@ bool Emit(nlohmann::json state) {
 bool IsKnownCommandType(const std::string& type) {
 	return type == "advance" || type == "back" || type == "capture"
 		|| type == "choose" || type == "confirm" || type == "confirm_name"
-		|| type == "goto" || type == "menu" || type == "move" || type == "set_name";
+		|| type == "goto" || type == "key" || type == "menu" || type == "move" || type == "set_name";
 }
 
 void Consume(const Command& cmd, const char* status, const char* reason);
@@ -333,8 +345,8 @@ void Consume(const Command& cmd, const char* status, const char* reason);
  * Reads command.json when its content changed. Returns true when a
  * fresh, not-yet-handled command is available. Commands from the other
  * input domains retain their existing routing, including stale-state
- * rejection. Capture is isolated before those checks: only its post-draw
- * poll may read it, and that poll never returns other command types.
+ * rejection. Capture and key are isolated before those checks: only their own polls
+ * may read them, and those polls never return other command types.
  */
 bool ReadFreshCommand(Command& out, int domain) {
 	std::ifstream in(g_dir + "/command.json");
@@ -358,16 +370,21 @@ bool ReadFreshCommand(Command& out, int domain) {
 	}
 	const bool is_capture = parsed.contains("type") && parsed["type"].is_string()
 		&& parsed["type"] == "capture";
-	if (is_capture != (domain == kCaptureDomain)) {
+	const bool is_key = parsed.contains("type") && parsed["type"].is_string()
+		&& parsed["type"] == "key";
+	if (is_capture != (domain == kCaptureDomain) || is_key != (domain == kKeyDomain)) {
 		return false;
 	}
 	Command cmd;
-	if (is_capture) {
+	if (is_capture || is_key) {
 		if (!parsed.contains("seq") || !parsed["seq"].is_number_integer()) {
 			return false;
 		}
 		cmd.seq = parsed["seq"].get<long>();
-		cmd.type = "capture";
+		cmd.type = is_capture ? "capture" : "key";
+		if (is_key && parsed.contains("button") && parsed["button"].is_string()) {
+			cmd.button = parsed["button"].get<std::string>();
+		}
 		// Deliberately ignore the requested state_id: title screens and
 		// picture waits may have no emitted state, or only a stale one.
 	} else {
@@ -473,6 +490,22 @@ void PollCaptureCommand() {
 	cmd.state_id = g_last_id;
 	const char* error = g_capture_enabled ? SaveCapture(cmd) : "capture disabled";
 	Consume(cmd, error ? "rejected" : "applied", error);
+}
+
+int PollKeyCommand() {
+	EnsureInit();
+	if (!g_enabled) return -1;
+	Command cmd;
+	if (!ReadFreshCommand(cmd, kKeyDomain)) return -1;
+	cmd.state_id = g_last_id;
+	const char* error = nullptr;
+	int button = -1;
+	if (!g_key_enabled) error = "key disabled";
+	else if (cmd.button == "decision") button = Input::DECISION;
+	else if (cmd.button == "cancel") button = Input::CANCEL;
+	else error = "invalid key button";
+	Consume(cmd, error ? "rejected" : "applied", error);
+	return button;
 }
 
 void OnMessageStart(const PendingMessage& pm, const std::string& assembled_text) {

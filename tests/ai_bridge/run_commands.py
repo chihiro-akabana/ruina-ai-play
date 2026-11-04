@@ -16,6 +16,8 @@ import tempfile
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('build', type=Path)
 parser.add_argument('--baseline', default='cdba88b')
+parser.add_argument('--allow-last-seq', action='store_true',
+                    help='normalize only the intended uniform state heartbeat addition')
 args = parser.parse_args()
 repo = Path(__file__).resolve().parents[2]
 build = args.build.resolve()
@@ -29,6 +31,25 @@ link_args = link_args[link_args.index('&&') + 1:]
 link_args = link_args[:link_args.index('&&')]
 link_args = [a for a in link_args if not a.endswith('/src/ai_state.cpp.o')
              and not a.endswith('/src/platform/sdl/main.cpp.o')]
+
+def without_heartbeat(value):
+    if isinstance(value, list):
+        return [without_heartbeat(v) for v in value]
+    if isinstance(value, dict):
+        result = {}
+        for key, child in value.items():
+            if key in ('state.json', 'states.jsonl'):
+                lines = []
+                for line in child.splitlines():
+                    state = json.loads(line)
+                    assert type(state.get('last_seq')) is int and state['last_seq'] >= 0, 'missing heartbeat'
+                    del state['last_seq']
+                    lines.append(json.dumps(state, sort_keys=True, ensure_ascii=False, separators=(',', ':')) + '\n')
+                result[key] = ''.join(lines)
+            else:
+                result[key] = without_heartbeat(child)
+        return result
+    return value
 
 with tempfile.TemporaryDirectory(prefix='ai-bridge-harness-') as directory:
     work = Path(directory)
@@ -54,6 +75,7 @@ with tempfile.TemporaryDirectory(prefix='ai-bridge-harness-') as directory:
     def run(name, *params, gate=None):
         env = os.environ.copy()
         env.pop('EASYRPG_AI_CAPTURE', None)
+        env.pop('EASYRPG_AI_KEY', None)
         if gate is not None:
             env['EASYRPG_AI_CAPTURE'] = gate
         return subprocess.check_output([str(work / name), *params], env=env, text=True)
@@ -66,8 +88,11 @@ with tempfile.TemporaryDirectory(prefix='ai-bridge-harness-') as directory:
     for gate in [None, '0', '1']:
         baseline = json.loads(run('baseline', 'compat', gate=gate))
         current = json.loads(run('current', 'compat', gate=gate))
+        if args.allow_last_seq:
+            current = without_heartbeat(current)
         assert baseline == current, f'compatibility mismatch with capture={gate!r}'
-        print(f'PASS exact differential vs {args.baseline}: capture={gate!r}, '
+        label = 'state last_seq addition only; otherwise byte-identical' if args.allow_last_seq else 'exact differential'
+        print(f'PASS {label} vs {args.baseline}: capture={gate!r}, '
               f'100 known-command scenarios, {current["checks"]} checks', flush=True)
     for gate in [None, '0', 'true', '01', '1']:
         print(run('current', 'gate', '1' if gate == '1' else '0', gate=gate).strip(), flush=True)

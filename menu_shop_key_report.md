@@ -122,3 +122,120 @@ rejects CP932. The real-data harness uses its supported windows-1252 decoder;
 it verifies real goods/prices and native transactions but does not verify
 Japanese text rendering/decoding. No live co-play, event-interpreter traversal
 to the shop, screenshots, or Windows build was run.
+
+## C — logical key pulse and consumption heartbeat
+
+`key` is the sole added verb. Example command:
+
+```json
+{"seq":501,"type":"key","button":"decision"}
+```
+
+Buttons are the closed set `decision` and `cancel`. `EnsureInit` samples
+`EASYRPG_AI_KEY` once; only the exact string `1` enables pulses. Gate-off
+commands are consumed once with rejected reason `key disabled`; invalid or
+missing buttons are consumed once with `invalid key button` when enabled.
+`PollKeyCommand` has its own input domain, isolated from capture and every
+ordinary scene poll. It ignores requested state_id (including missing or
+nonnumeric values) and acks the current `g_last_id`, including 0 before any
+state emission. Capture behavior and its metadata are unchanged.
+
+`Input::Update` calls that intake while computing logical button state. A
+successful command makes the button pressed/triggered/repeated for that input
+frame; absent physical input it releases next frame. Consecutive commands each
+produce a trigger. A physical hold does not suppress a pulse or have its hold
+duration reset. There is no queue, hold API, automatic repeat, or OS event
+injection. System-only updates do not consume logical pulses. Each command is
+one attempt in one logical input frame, following ordinary input semantics.
+
+`BuildContext` adds top-level `last_seq`; common `Emit` also sets it
+authoritatively for every producer. It is the highest seq consumed so far,
+including applied, rejected, capture, key and unknown commands. As required for
+compatibility, that metadata is excluded from the visible-content duplicate
+comparison: heartbeat changes alone do not generate new states or change IDs.
+The next emitted state always contains the latest value. This is a consumption
+marker on emitted observations, not a periodic timer or acknowledgement file.
+
+Files: `src/ai_state.cpp/.h` (`EnsureInit`, command parser/domain routing,
+`PollKeyCommand`, `BuildContext`, `Emit`) and `src/input.cpp` (`Input::Update`).
+Checks live in `tests/ai_bridge/key.cpp` / `run_key.py`. The legacy command runner
+has an explicit `--allow-last-seq` switch: it asserts heartbeat presence and
+normalizes only that top-level state field before comparing the full protocol
+trace. It does not normalize any other state changes or ack differences.
+Old sources get inert linkage adapters for hooks absent at their revision;
+legacy differential scenarios never call those hooks.
+
+Verification actually run:
+
+- Native Release build passed; a separate final clean build is recorded below.
+- `run_key.py`: five gate cases (unset, 0, true, 01, 1; 7/7/7/7/6 checks),
+  pulse/heartbeat/native-cancel suite 97 checks, disabled bridge 2 checks.
+  Coverage includes an unhooked title-equivalent wait, decision and cancel,
+  60-frame no-repeat check, consecutive commands, held physical input, raw-key
+  isolation, capture/other-domain isolation, exactly one gate-off/invalid ack,
+  arbitrary state_id, actual native equip cancel (item to slot, one frame later
+  still at slot, second command closes the screen), all 22 current state types
+  through common Emit, all ordinary domains/capture/key/unknown consumption,
+  monotonic seq, actual name-state heartbeat and preserved duplicate suppression.
+- Legacy differential against `c905abf`: 100 scenarios × capture unset/0/1,
+  101 checks each, byte-identical after removing **only added state last_seq**.
+  Capture 179, unknown-command 881, five capture-gate cases (6 each), disabled
+  bridge 2 all passed. Both scene-independent polls leave legacy verbs alone.
+- Base/current native differential: byte-identical 131-frame shop gameplay
+  trace plus 180 input frames (triggered/repeated/released, physical hold time,
+  raw pressed/triggered/released, cardinal/diagonal directions).
+- Final workspace fixture rerun: equip 19 and shop 30 checks passed. Real
+  Ruina shop rerun: 51 checks passed, including the pre-emission confirm guard.
+  Battle-result regression: all 77 checks passed.
+
+Limitations: no interactive title/new-game start, notebook/crafting/picture-wait
+session, live screenshot comparison, or non-Linux execution. The headless wait
+uses the game's actual Input::Update and trigger queries; the actual native
+equip screen separately proves cancel delivery and single-frame behavior.
+Japanese decoding/rendering remains unverified as described in B.
+
+## Final clean verification and delivery
+
+Separate configure and full 207-step Release build passed from the isolated
+source checkout in `/tmp/menu-shop-key-clean-build`. All six suites were then
+rerun against that clean build and exited 0:
+
+```sh
+python3 tests/ai_bridge/run_menu_shop_key.py BUILD
+python3 tests/ai_bridge/run_menu_shop_key.py BUILD /home/pub/ruina_kit/game
+python3 tests/ai_bridge/run_key.py BUILD
+python3 tests/ai_bridge/run_commands.py BUILD --baseline c905abf --allow-last-seq
+python3 tests/ai_bridge/run_shop_compat.py BASE_BUILD BUILD
+python3 tests/ai_bridge/run_battle.py BUILD
+```
+
+Results: equip 19; fixture shop 30; real shop 51; key gate 34, key pulse/heartbeat
+97, bridge-disabled 2; legacy differential 303 checks; capture 179,
+unknown-command 881, capture gates 30, capture-disabled bridge 2; native shop
+131 frames plus physical input 180 frames; battle 77. The full standalone
+engine unit-test target was not run. Logs use `/tmp/menu-shop-key-clean-*`.
+`BASE_BUILD` was `/tmp/followup-b-committed-build`, the existing actual base
+build. `git diff --check` passed. Sources in the workspace and isolated checkout
+were compared; all delivered files match.
+
+Commits are ordered A, B, C after `c905abf`:
+
+1. `e050e43` — Bridge: complete equipment selection and displayed previews
+2. `ee33223` — Bridge: add shop states and explicit staged transaction confirmation
+3. Bridge: add gated input-frame key pulses and state consumption heartbeat
+
+`menu_shop_key.bundle` carries exactly this three-commit range, with base
+`c905abf` as its prerequisite. Bundle verification and an import into a fresh
+checkout at that base passed; the imported tree matches the delivery checkout.
+The bundle is a delivery artifact, outside the commits it contains. Import into
+a writable checkout already at the base with:
+
+```sh
+git fetch /path/to/menu_shop_key.bundle master
+git merge --ff-only FETCH_HEAD
+```
+
+This workspace's read-only Git metadata still describes the older checkout.
+A checkout in that same situation first needs the existing
+`followup_fixes.bundle` to reach `c905abf`. The source changes and report are
+also present directly in the workspace. No workspace Git metadata was forced.

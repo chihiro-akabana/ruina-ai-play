@@ -26,13 +26,20 @@
  * It saves the just-drawn native frame as capture.png with capture.json
  * metadata, only when EASYRPG_AI_CAPTURE=1 was set at bridge init.
  * Otherwise it is consumed and rejected with detail "capture disabled".
+ * Key likewise ignores state_id and acknowledges the current id. It is read
+ * only inside Input::Update and pulses decision/cancel for one logical input
+ * frame. EASYRPG_AI_KEY must be exactly "1" at initialization; otherwise key
+ * commands are consumed with reason "key disabled". No hold or repeat option.
+ * Every emitted state includes last_seq, the highest consumed command seq.
+ * Heartbeat changes alone do not cause otherwise duplicate states to emit.
  * The closed command type set is advance, back, capture, choose, confirm,
- * confirm_name, goto, menu, move, set_name. A fresh unknown type is consumed
+ * confirm_name, goto, key, menu, move, set_name. A fresh unknown type is consumed
  * once and rejected with reason "unknown command type" by the first
- * non-capture poll that reads it. Known types retain their scene routing:
+ * ordinary scene poll that reads it. Known types retain their scene routing:
  * an inapplicable type stays silent so a later applicable scene can read it
- * (existing stale-state checks still apply). Capture is read only by its
- * own poll, which never consumes another type.
+ * (existing stale-state checks still apply); equip/shop reject misplaced verbs.
+ * Capture is read only by its
+ * own poll, which never consumes another type; the same isolation holds for key.
  *
  * Only information that is on screen (or inspectable through normal
  * menus) is emitted: displayed text, displayed choices, party status,
@@ -64,6 +71,10 @@ namespace AiState {
 
 /** Scene-independent read-only capture poll; call immediately after drawing. */
 void PollCaptureCommand();
+
+/** Scene-independent key intake. Called only by Input::Update; returns the
+ * logical InputButton to pulse this frame, or -1. Never sends OS key events. */
+int PollKeyCommand();
 
 /** Called when a message has been fully assembled for display. */
 void OnMessageStart(const PendingMessage& pm, const std::string& assembled_text);

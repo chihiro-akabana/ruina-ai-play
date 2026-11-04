@@ -60,6 +60,7 @@ static void Compat() {
                 Send(++seq, type, stale ? g_last_id-1 : g_last_id);
                 auto before = Protocol();
                 PollCaptureCommand();
+                PollKeyCommand();
                 Check(Protocol()==before, "capture poll cannot mutate legacy protocol");
                 for (int n=0;n<5;++n) {
                     int d=(first+n)%5;

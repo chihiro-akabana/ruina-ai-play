@@ -33,4 +33,5 @@ with tempfile.TemporaryDirectory(prefix='ai-shop-compat-') as directory:
         traces.append(subprocess.check_output([exe]))
     assert len(traces) == 2 and traces[0] == traces[1], 'native shop trace mismatch'
     print('PASS byte-identical native shop gameplay trace (no bridge commands); '
-          f'{len(json.loads(traces[0])["trace"])} frames; new shop state emissions are intentional')
+          f'{len(json.loads(traces[0])["trace"])} shop frames, '
+          f'{len(json.loads(traces[0])["input_trace"])} input frames; new shop states/last_seq are intentional')

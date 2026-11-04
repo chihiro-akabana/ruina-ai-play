@@ -17,6 +17,7 @@
 
 // Headers
 #include "input.h"
+#include "ai_state.h"
 #include "game_config.h"
 #include "input_buttons.h"
 #include "input_source.h"
@@ -114,10 +115,21 @@ void Input::Update() {
 	source->Update();
 	auto& pressed_buttons = source->GetPressedButtons();
 
+	const int bridge_pulse = AiState::PollKeyCommand();
+
 	// Check button states
 	for (unsigned i = 0; i < BUTTON_COUNT; ++i) {
 		bool pressed = pressed_buttons[i];
 		UpdateButton(i, pressed);
+		if (bridge_pulse == static_cast<int>(i)) {
+			// One logical frame, independent of physical holds and auto-repeat.
+			// The next normal update releases an otherwise unpressed button;
+			// consecutive commands each produce their own fresh trigger.
+			if (!pressed) press_time[i] = 1;
+			triggered[i] = true;
+			repeated[i] = true;
+			released[i] = false;
+		}
 	}
 
 	auto& directions = source->GetDirectionMappings();
